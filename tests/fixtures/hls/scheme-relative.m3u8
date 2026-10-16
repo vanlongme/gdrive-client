@@ -1,0 +1,5 @@
+#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXTINF:6.0,
+//evil.example.com/seg0.ts
+#EXT-X-ENDLIST

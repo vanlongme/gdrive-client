@@ -1,0 +1,105 @@
+# CI for gdrive-client (plan T15, wave-5 decision 5).
+#
+# Reproduces the local gates: Node 24 (pinned by .nvmrc), npm ci, strict
+# typecheck, the workerd unit/integration suite, the production build and the
+# Playwright E2E suite on Chromium and Firefox.
+#
+# Security posture: no secrets are used anywhere in this workflow — the E2E
+# suite runs on the committed public test fixtures in tests/e2e/e2e-env.ts.
+# `pull_request` (not `pull_request_target`) keeps forked PRs on the read-only
+# token; top-level permissions are least-privilege. No deploy job exists and
+# no job touches Google or Cloudflare.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-test-build:
+    name: check / unit+integration / build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+      # Scans the freshly built dist/ for leaked secrets (fixture/dev.vars
+      # values, token shapes, PEM keys), stray source maps, emitted
+      # .dev.vars files and missing required outputs (plan T16).
+      - run: npm run check:bundle
+
+  e2e:
+    name: e2e (chromium + firefox)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # `chrome` installs the branded Google Chrome channel the suite uses;
+      # `--with-deps` installs the browser OS packages on the runner.
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chrome firefox
+      # The default projects are chromium + firefox; --reporter keeps list
+      # output and writes an HTML report for the failure artifact.
+      - name: Run E2E suite
+        run: npx playwright test --reporter=list,html
+      # Browser -> built worker -> fake Google journey on :8878. Reuses the
+      # dist/ bundle the default suite's webServer just built.
+      - name: Run fake-Google journey
+        run: npx playwright test -c playwright.journey.config.ts --reporter=list
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report
+          retention-days: 7
+
+  # WebKit is defined in playwright.config.ts behind E2E_WEBKIT=1. Locally it
+  # is skipped because the runner needs OS packages that are not installed;
+  # in CI the deps are provisioned but the job is non-blocking until the
+  # suite is proven on WebKit (no local baseline exists yet).
+  e2e-webkit:
+    name: e2e (webkit, non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Install WebKit
+        run: npx playwright install --with-deps webkit
+      - name: Run E2E suite (webkit)
+        env:
+          E2E_WEBKIT: "1"
+        run: npx playwright test --project=webkit --reporter=list,html
+      - name: Upload Playwright report (webkit)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-webkit
+          path: playwright-report
+          retention-days: 7

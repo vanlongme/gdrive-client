@@ -1,0 +1,69 @@
+{
+  "name": "gdrive-client",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Google Drive workspace on Cloudflare Workers with OAuth writes and service-account content reads",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "check": "tsc -b",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:journey": "npm run build && playwright test -c playwright.journey.config.ts",
+    "db:migrations:local": "wrangler d1 migrations apply DB --local",
+    "db:migrations:remote": "wrangler d1 migrations apply DB --remote",
+    "db:migrations:remote:staging": "wrangler d1 migrations apply DB --remote --env staging",
+    "deploy": "npm run build && node scripts/release/strip-dev-vars.ts && wrangler deploy",
+    "deploy:staging": "CLOUDFLARE_ENV=staging npm run build && node scripts/release/strip-dev-vars.ts && CLOUDFLARE_ENV=staging wrangler deploy",
+    "deploy:dry-run": "npm run build && node scripts/release/strip-dev-vars.ts && wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "check:bundle": "node scripts/release/check-bundle.ts",
+    "cf:typegen": "wrangler types"
+  },
+  "cloudflare": {
+    "bindings": {
+      "APP_MASTER_KEY": {
+        "description": "Base64-encoded 32 random bytes; master key for server-side secret envelopes."
+      },
+      "SETUP_TOKEN": {
+        "description": "Base64-encoded 32 random bytes; one-time token that authorizes initial admin setup."
+      }
+    }
+  },
+  "dependencies": {
+    "better-auth": "1.7.7",
+    "drizzle-orm": "0.45.3",
+    "hash-wasm": "4.12.0",
+    "hls.js": "1.7.3",
+    "hono": "4.13.13",
+    "micromark": "4.0.3",
+    "micromark-extension-gfm": "3.0.0",
+    "pdfjs-dist": "6.4.299",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-router": "8.4.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.62.5",
+    "@cloudflare/vitest-plugin": "1.3.6",
+    "@cloudflare/workers-types": "5.20261004.1",
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.19.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "@vitest/runner": "4.1.11",
+    "@vitest/snapshot": "4.1.11",
+    "drizzle-kit": "0.31.11",
+    "typescript": "5.9.3",
+    "vite": "8.3.2",
+    "vitest": "4.1.11",
+    "wrangler": "4.147.0"
+  }
+}

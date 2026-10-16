@@ -1,0 +1,167 @@
+/**
+ * Transfers UI (T09): persistent drawer + page styles. Component-scoped so
+ * the shared app.css stays untouched; reuses tokens.css variables and the
+ * existing .btn/.badge/.field primitives.
+ */
+
+.transfer-drawer {
+  position: fixed;
+  inset-inline-end: var(--space-4);
+  bottom: var(--space-4);
+  width: min(26rem, calc(100vw - 2 * var(--space-4)));
+  max-width: calc(100vw - 2 * var(--space-4));
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-drawer);
+  z-index: 40;
+}
+
+.transfer-drawer-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+}
+
+.transfer-drawer-head h2 {
+  margin: 0;
+  font-size: 1rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.transfer-drawer-body {
+  max-height: 20rem;
+  overflow-y: auto;
+  padding: var(--space-3);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.transfer-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.transfer-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.transfer-item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.transfer-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.transfer-meta {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.transfer-progress {
+  position: relative;
+  height: 0.5rem;
+  border-radius: 999px;
+  background: var(--surface-alt);
+  overflow: hidden;
+}
+
+.transfer-progress .fill-sent,
+.transfer-progress .fill-confirmed {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+}
+
+/* Sent bytes are optimistic (display only); confirmed bytes render solid. */
+.transfer-progress .fill-sent {
+  background: var(--accent);
+  opacity: 0.35;
+}
+
+.transfer-progress .fill-confirmed {
+  background: var(--accent);
+}
+
+.transfer-item[data-state="completed"] .transfer-progress .fill-confirmed {
+  background: var(--success);
+}
+
+.transfer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.transfer-error {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--danger);
+}
+
+.transfer-note {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+@media (max-width: 640px) {
+  .transfer-drawer {
+    inset-inline: var(--space-2);
+    bottom: var(--space-2);
+    width: auto;
+  }
+}
+
+/* Folder-upload batch cards (T10) */
+.folder-node-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+.folder-node {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--font-size-sm);
+}
+.folder-node + .folder-node {
+  border-top: 1px solid var(--color-border);
+}
+.folder-node-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.badge-sm {
+  font-size: var(--font-size-xs);
+}
+.btn-xs {
+  padding: 0 var(--space-2);
+  font-size: var(--font-size-xs);
+}
+.listing-drop-area {
+  outline-offset: -2px;
+}

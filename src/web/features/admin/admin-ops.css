@@ -1,0 +1,136 @@
+/* Admin operations tab (T14): diagnostics counters, cleanup result and the
+   rotation stepper. Reuses app.css tokens + btn/badge/alert classes. */
+
+.admin-ops-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3, 0.75rem);
+}
+
+.admin-ops-note {
+  color: var(--color-text-muted, #64748b);
+  font-size: var(--font-sm, 0.875rem);
+}
+
+.admin-ops-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2, 0.5rem);
+  align-items: flex-start;
+  margin-block: var(--space-2, 0.5rem);
+}
+
+.admin-ops-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-2, 0.5rem) var(--space-4, 1rem);
+  margin-block: var(--space-2, 0.5rem);
+}
+
+.admin-ops-kv {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3, 0.75rem);
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
+  padding-block: 2px;
+}
+
+.admin-ops-kv dt {
+  color: var(--color-text-muted, #64748b);
+  font-size: var(--font-sm, 0.875rem);
+}
+
+.admin-ops-kv dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-ops-result {
+  border-left: 3px solid var(--color-border, #e2e8f0);
+  padding-inline-start: var(--space-3, 0.75rem);
+  margin-block: var(--space-2, 0.5rem);
+}
+
+.admin-ops-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2, 0.5rem);
+  list-style: none;
+  padding: 0;
+  margin-block: var(--space-3, 0.75rem);
+  counter-reset: ops-step;
+}
+
+.admin-ops-step {
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: var(--radius-sm, 4px);
+  padding: 2px var(--space-2, 0.5rem);
+  font-size: var(--font-sm, 0.875rem);
+  color: var(--color-text-muted, #64748b);
+}
+
+.admin-ops-step-done {
+  border-color: var(--color-success, #16a34a);
+  color: var(--color-success, #16a34a);
+}
+
+.admin-ops-step-current {
+  border-color: var(--color-primary, #2563eb);
+  color: var(--color-primary, #2563eb);
+  font-weight: 600;
+}
+
+.admin-ops-step-failed {
+  border-color: var(--color-danger, #dc2626);
+  color: var(--color-danger, #dc2626);
+  font-weight: 600;
+}
+
+.admin-ops-diag h4,
+.admin-section h3 + .admin-ops-note {
+  margin-top: var(--space-3, 0.75rem);
+}
+
+@media (max-width: 40rem) {
+  .admin-ops-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* T11 onboarding checklist + Shared Drive chooser. */
+.onboarding-steps li strong {
+  margin-right: var(--space-2, 0.5rem);
+}
+
+.callback-line {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2, 0.5rem);
+  flex-wrap: wrap;
+  word-break: break-all;
+}
+
+.drive-chooser {
+  margin-top: var(--space-2, 0.5rem);
+}
+
+.drive-list {
+  list-style: none;
+  margin: var(--space-2, 0.5rem) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 0.5rem);
+}
+
+.drive-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 0.5rem);
+  flex-wrap: wrap;
+}
+
+.drive-name {
+  font-weight: 600;
+}

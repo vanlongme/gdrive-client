@@ -1,0 +1,6 @@
+#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXT-X-CUSTOM-EXFIL:URI="https://evil.example.com/x"
+#EXTINF:6.0,
+seg0.ts
+#EXT-X-ENDLIST

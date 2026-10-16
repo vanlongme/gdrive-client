@@ -1,0 +1,4 @@
+#EXTM3U
+#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI="skd://key",KEYFORMAT="com.apple.streamingkeydelivery"
+#EXT-X-STREAM-INF:BANDWIDTH=1000
+media-ts.m3u8

@@ -1,0 +1,326 @@
+/**
+ * Preview dialog + viewer styles (T12). Component-scoped with the
+ * `preview-` prefix so the shared app.css stays untouched; reuses
+ * tokens.css variables and the existing .btn/.alert primitives.
+ */
+
+.preview-dialog {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0;
+  width: min(1100px, 94vw);
+  height: min(760px, 88vh);
+  max-width: 94vw;
+  max-height: 88vh;
+  background: var(--surface);
+  color: var(--text);
+  overflow: hidden;
+}
+
+.preview-dialog::backdrop {
+  background: rgb(0 0 0 / 0.45);
+}
+
+.preview-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.preview-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-alt);
+  min-height: 3rem;
+}
+
+.preview-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.preview-header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+.preview-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.preview-viewer {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--border);
+}
+
+.preview-toolbar-plain {
+  padding: 0;
+  border: 0;
+}
+
+.preview-toolbar-spacer {
+  flex: 1 1 auto;
+}
+
+.preview-toolbar-label {
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+.preview-stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+}
+
+.preview-stage-image {
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+}
+
+.preview-stage-image img {
+  display: block;
+  user-select: none;
+}
+
+.preview-image-fit {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.preview-stage-video {
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  background: #000;
+}
+
+.preview-stage-video video {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.preview-stage-audio {
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+}
+
+.preview-stage-audio audio {
+  width: min(560px, 100%);
+}
+
+.preview-stage-pdf {
+  display: flex;
+  justify-content: center;
+  padding: var(--space-4);
+  background: var(--surface-alt);
+}
+
+.preview-pdf-page {
+  position: relative;
+  background: #fff;
+  box-shadow: var(--shadow-drawer);
+}
+
+.preview-pdf-page canvas {
+  display: block;
+}
+
+/* pdf.js TextLayer contract — positioning rules the library relies on. */
+.preview-textlayer {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  line-height: 1;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: transparent;
+}
+
+.preview-textlayer span,
+.preview-textlayer br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+
+.preview-textlayer > :not(.markedContent),
+.preview-textlayer .markedContent span:not(.markedContent) {
+  display: inline-block;
+}
+
+.preview-textlayer ::selection {
+  background: var(--accent-subtle);
+  color: transparent;
+}
+
+.preview-match {
+  background: rgb(255 212 0 / 0.5);
+  border-radius: 2px;
+}
+
+.preview-code-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: var(--space-4);
+}
+
+.preview-code {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  counter-reset: previewline;
+}
+
+.preview-code-line {
+  display: block;
+  white-space: pre-wrap;
+}
+
+.preview-code-line::before {
+  counter-increment: previewline;
+  content: counter(previewline);
+  display: inline-block;
+  width: 4ch;
+  margin-right: var(--space-3);
+  text-align: right;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.preview-markdown {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-5);
+  max-width: none;
+  line-height: 1.6;
+}
+
+.preview-markdown img {
+  max-width: 100%;
+}
+
+.preview-markdown pre {
+  overflow: auto;
+  background: var(--surface-alt);
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+}
+
+.preview-markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.875em;
+}
+
+.preview-markdown table {
+  border-collapse: collapse;
+}
+
+.preview-markdown th,
+.preview-markdown td {
+  border: 1px solid var(--border);
+  padding: var(--space-1) var(--space-3);
+}
+
+.preview-markdown blockquote {
+  margin: 0;
+  padding-left: var(--space-4);
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
+}
+
+.preview-banner {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  font-size: 0.875rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--accent-subtle);
+}
+
+.preview-banner-warn {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.preview-center {
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+  text-align: center;
+}
+
+.preview-center-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  max-width: 34rem;
+}
+
+.preview-meta {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  text-align: left;
+}
+
+.preview-meta dt {
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.preview-meta dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.preview-search-input {
+  font: inherit;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  min-width: 12rem;
+}

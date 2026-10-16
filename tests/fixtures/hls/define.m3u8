@@ -1,0 +1,4 @@
+#EXTM3U
+#EXT-X-DEFINE:NAME="host",VALUE="https://evil.example.com"
+#EXT-X-STREAM-INF:BANDWIDTH=1000
+{$host}/media-ts.m3u8

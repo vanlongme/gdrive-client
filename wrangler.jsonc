@@ -1,0 +1,81 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "drive-worker",
+  "main": "./src/worker/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "assets": {
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api", "/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "drive-worker-db",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PROJECT_COORDINATOR",
+        "class_name": "ProjectCoordinator"
+      },
+      {
+        "name": "UPLOAD_SESSION",
+        "class_name": "UploadSession"
+      }
+    ]
+  },
+  "exports": {
+    "ProjectCoordinator": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "UploadSession": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "secrets": {
+    "required": ["APP_MASTER_KEY", "SETUP_TOKEN"]
+  },
+  // Selected at build time via CLOUDFLARE_ENV=staging (the Cloudflare Vite
+  // plugin resolves this block into dist/drive_worker/wrangler.json with
+  // targetEnvironment "staging"); `wrangler d1 ... --env staging` reads it
+  // directly. Only NON-inheritable fields are repeated: name overrides the
+  // top-level name, while d1_databases, durable_objects and secrets are
+  // per-environment in Wrangler. `exports`, `migrations`, `assets`, `main`,
+  // compatibility settings and workers_dev are inherited from top level.
+  // database_id is intentionally absent: the operator pastes the id printed
+  // by `wrangler d1 create drive-worker-db-staging` before first deploy.
+  "env": {
+    "staging": {
+      "name": "drive-worker-staging",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "drive-worker-db-staging",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "PROJECT_COORDINATOR",
+            "class_name": "ProjectCoordinator"
+          },
+          {
+            "name": "UPLOAD_SESSION",
+            "class_name": "UploadSession"
+          }
+        ]
+      },
+      "secrets": {
+        "required": ["APP_MASTER_KEY", "SETUP_TOKEN"]
+      }
+    }
+  }
+}

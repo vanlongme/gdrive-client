@@ -1,0 +1,2 @@
+Preview fixture — plain text.
+Line two with Unicode: Hợp đồng ✓ báo cáo.
