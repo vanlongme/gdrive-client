@@ -18,8 +18,9 @@ trong ledger bên dưới; kết quả local và kiểm thử Google thật đư
 Wave 4/5 bổ sung browser uploader/recovery, folder batches, preview viewers,
 HLS, tab onboarding admin (trang `/admin` mặc định, có Shared Drive chooser),
 rotation khóa chủ có re-key UploadSession trực tiếp, diagnostics metrics
-trong-isolate và journey fake-Google end-to-end. Chưa có deployment hoặc
-mount kết nối Google thật được xác nhận.
+trong-isolate và journey fake-Google end-to-end. Đã có một deployment
+Cloudflare đầu tiên qua CLI (2026-10-17, smoke check health/setup đạt); setup
+admin, mount kết nối Google thật và các gate G1–G6 còn lại chưa được xác nhận.
 
 Đặc tả kiến trúc, kế hoạch triển khai và bằng chứng kiểm thử nội bộ được lưu
 ngoài repository public này; tài liệu vận hành nằm trong `docs/` (xem mục
@@ -90,8 +91,9 @@ setup → admin login → import OAuth client → consent redirect → mount →
 → upload/download thật qua HTTP API; nó là kiểm thử tích hợp local, không
 phải bằng chứng Google live. CI workflow `.github/workflows/ci.yml` tái hiện
 các gate local (check, test, build, E2E chromium+firefox, journey) cộng một
-job WebKit **non-blocking**; file này mới chỉ được kiểm tra tĩnh — chưa bao
-giờ chạy trên GitHub vì chưa có push được ủy quyền. Bench hiệu năng dưới
+job WebKit **non-blocking**. Trên GitHub Actions: check/unit/integration/build,
+E2E chromium+firefox và journey đều xanh; job WebKit hiện đỏ hàng loạt (lỗi
+môi trường đang điều tra, không chặn CI). Bench hiệu năng dưới
 `tests/perf/` chạy fixture qua Miniflare (không TCP/TLS), không phải số liệu
 Google thật.
 

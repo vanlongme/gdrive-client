@@ -3,9 +3,11 @@
 Status: **DRAFT — not release-ready.** This checklist mirrors plan task T16
 of the project plan (kept outside this public repository). Every external
 gate below is `awaiting-external` until its required input/authorization
-exists and the listed evidence is recorded by the maintainer. Nothing in
-this repository has been deployed or tested against real Cloudflare/Google —
-do not mark a gate passed on the strength of local or mocked results.
+exists and the listed evidence is recorded by the maintainer. A first CLI
+deployment to Cloudflare exists (2026-10-17, health/setup smoke checks only);
+no gate below is passed by that alone, and nothing has been tested against
+real Google — do not mark a gate passed on the strength of local or mocked
+results.
 
 ## 1. Local packaging gates (runnable now)
 
@@ -22,7 +24,7 @@ All commands assume repo root and Node 24
 | Fake-Google journey | `npm run test:e2e:journey` (build + `playwright.journey.config.ts`: browser → built worker in Miniflare → in-process fake Google on :8878) | script exists; wave-5 local pass 2/2 — **fixture, not live-Google evidence** (T15-journey (internal record)) |
 | Deploy dry-run | `npm run deploy:dry-run` (build + strip-dev-vars + `wrangler deploy --dry-run --outdir .wrangler/dry-run`) | wave-6 local pass — dry-run compiled and checked the production bundle (10 modules, 786.88 KiB; 71 assets; upload 2166.36 KiB). **A dry-run is not a deployment** — G1 stays `awaiting-external` (T16-packaging (internal record)) |
 | Bundle scan | `npm run check:bundle` (`scripts/release/check-bundle.ts`: secret/source-map scan of `dist/` + required-asset check) | wave-6 local pass — production `dist/` clean (83 files; `_headers`, pdf/hash/hls outputs present). In a dev checkout with `.dev.vars` the emitted `dist/drive_worker/.dev.vars` fails the scan by design — see [deployment.md](deployment.md) |
-| CI workflow | `.github/workflows/ci.yml` — reproduces check/test/build/`check:bundle`/E2E + journey; `e2e-webkit` job is `continue-on-error: true` | **statically validated only — never run on GitHub** (no push authorized); WebKit never run locally (~91 OS packages not installed, no baseline) — see T15-ci-budgets (internal record) |
+| CI workflow | `.github/workflows/ci.yml` — reproduces check/test/build/`check:bundle`/E2E + journey; `e2e-webkit` job is `continue-on-error: true` | runs on GitHub Actions: check/unit/integration/build, Chromium+Firefox E2E and the journey are green; the non-blocking WebKit job currently fails broadly (environment issue under investigation); WebKit never run locally (~91 OS packages not installed) |
 | Local migrations | `npm run db:migrations:local` | script exists; wraps `wrangler d1 migrations apply DB --local` |
 | Typegen | `npm run cf:typegen` | script exists; wraps `wrangler types` |
 | Env sanity | `node scripts/doctor.ts` | `--help` verified; read-only |
