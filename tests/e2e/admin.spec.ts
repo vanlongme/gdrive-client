@@ -492,11 +492,19 @@ test("provider health separates OAuth and SA axes", async ({
   try {
     await page.getByRole("button", { name: "Trạng thái", exact: true }).click();
     await expect(page.getByText("API đang hoạt động")).toBeVisible();
+    // level 3 = provider-health section; the async diagnostics panel can
+    // render same-named h4 headings, which made this racy on slower runners.
     await expect(
-      page.getByRole("heading", { name: "Kết nối OAuth (catalog/upload)" }),
+      page.getByRole("heading", {
+        name: "Kết nối OAuth (catalog/upload)",
+        level: 3,
+      }),
     ).toBeVisible();
     await expect(
-      page.getByRole("heading", { name: "Service account (đọc nội dung)" }),
+      page.getByRole("heading", {
+        name: "Service account (đọc nội dung)",
+        level: 3,
+      }),
     ).toBeVisible();
     await expect(page.getByText(CONN_CATALOG).first()).toBeVisible();
     await expect(page.getByText(saRowId).first()).toBeVisible();
