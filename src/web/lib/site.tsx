@@ -15,7 +15,7 @@ import { useI18n } from "./i18n";
 /**
  * Site branding provider (wave-8 C1). GET /api/v1/site is anonymous and
  * answers defaults before setup completes, so this provider sits above the
- * whole router — the public /p/<slug> surface uses it for the glass header
+ * whole router — the public /public/<slug> surface uses it for the glass header
  * without ever touching session or admin APIs.
  *
  * While a fetch is in flight the server-side defaults are used so the brand

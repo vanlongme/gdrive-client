@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation } from "react-router";
+import { createBrowserRouter, Navigate, Outlet, RouterProvider, useLocation, useParams } from "react-router";
 import { AppShell } from "./components/app-shell";
 import { NotFoundPage } from "./components/not-found";
 import { AdminPage } from "./features/admin/admin-page";
@@ -20,8 +20,9 @@ import { ThemeProvider } from "./lib/theme";
  *   unauthenticated, Explorer once signed in.
  * - /setup and /login sit outside the authenticated frame.
  * - The app shell owns navigation; feature areas render through its Outlet.
- * - /p/:slug (wave-8) is the anonymous public surface: it never mounts the
+ * - /public/:slug (wave-8) is the anonymous public surface: it never mounts the
  *   setup/session providers, so it cannot issue session or admin calls.
+ *   Links shared before the rename used /p/:slug and redirect here.
  */
 function Splash() {
   const { t } = useI18n();
@@ -101,8 +102,14 @@ function AppProviders() {
   );
 }
 
+function LegacyPublicRedirect() {
+  const { slug = "" } = useParams();
+  return <Navigate to={`/public/${encodeURIComponent(slug)}`} replace />;
+}
+
 const router = createBrowserRouter([
-  { path: "/p/:slug", element: <PublicFolderPage /> },
+  { path: "/public/:slug", element: <PublicFolderPage /> },
+  { path: "/p/:slug", element: <LegacyPublicRedirect /> },
   {
     element: <AppProviders />,
     children: [

@@ -125,7 +125,7 @@ describe('admin lifecycle', () => {
     expect(res.status).toBe(201);
     const { link } = (await res.json()) as { link: Record<string, unknown> };
     expect(link.slug).toMatch(/^public-folder-[a-z2-7]{26}$/);
-    expect(link.path).toBe(`/p/${link.slug}`);
+    expect(link.path).toBe(`/public/${link.slug}`);
     expect(link.mountLabel).toBe('Team Drive');
     expect(link.folderName).toBe('Public Folder');
     expect(link.createdByEmail).toBe('admin@x.test');

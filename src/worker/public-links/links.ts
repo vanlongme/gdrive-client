@@ -147,7 +147,7 @@ export function publicLinkView(
   return PublicFolderLinkViewSchema.parse({
     id: link.id,
     slug: link.slug,
-    path: `/p/${link.slug}`,
+    path: `/public/${link.slug}`,
     mountId: link.mountId,
     mountLabel: mount?.label ?? '(removed mount)',
     folderId: link.folderId,

@@ -33,7 +33,7 @@ import { PublicPreviewDialog } from "./public-preview-dialog";
 import "./public.css";
 
 /**
- * Anonymous public folder surface (wave-8 C5): /p/:slug outside the auth
+ * Anonymous public folder surface (wave-8 C5): /public/:slug outside the auth
  * shell. Only /api/v1/site and /api/v1/p/<slug> endpoints are reachable —
  * the router mounts no session/setup providers on this route, so no session
  * or admin call can ever fire here. Locked links collect a password; the

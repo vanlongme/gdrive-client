@@ -278,7 +278,7 @@ test("happy path: create from Explorer UI, anonymous list + download, no session
   await expect(dialog).toBeVisible();
   await dialog.getByText("Cho phép tải cả thư mục").click();
   await dialog.getByRole("button", { name: "Tạo liên kết" }).click();
-  await expect(page.locator("#public-link-url")).toHaveValue(/\/p\//, {
+  await expect(page.locator("#public-link-url")).toHaveValue(/\/public\//, {
     timeout: 10_000,
   });
   const absoluteUrl = await page.locator("#public-link-url").inputValue();
@@ -351,7 +351,10 @@ test("locked path: wrong password rejected, correct password unlocks the listing
 
   const anon = await browser.newContext();
   const page = await anon.newPage();
-  await page.goto(link.path);
+  // Links shared before the rename used /p/<slug>; they land on /public/<slug>.
+  expect(link.path).toBe(`/public/${link.slug}`);
+  await page.goto(`/p/${link.slug}`);
+  await expect(page).toHaveURL(new RegExp(`/public/${link.slug}$`));
   await expect(page.locator("#public-password")).toBeVisible({
     timeout: 15_000,
   });
