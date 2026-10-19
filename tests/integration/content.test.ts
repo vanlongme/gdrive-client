@@ -80,6 +80,7 @@ async function resetState() {
     'mount_grants',
     'mount_read_credentials',
     'service_accounts',
+    'containment_verdicts',
     'mounts',
     'google_connections',
     'google_oauth_clients',
@@ -379,10 +380,12 @@ describe('GET content', () => {
     const disposition = res.headers.get('content-disposition') ?? '';
     expect(disposition).toContain('inline');
     expect(disposition).toContain('filename="notes.txt"');
-    // Metadata and body came from the same SA identity.
-    expect(provider.calls[0]?.op).toBe('meta');
-    expect(provider.calls[1]?.op).toBe('content');
-    expect(provider.calls[1]?.identityId).toBe(provider.calls[0]?.identityId);
+    // Metadata and body came from the same SA identity. The media open
+    // overlaps verification (wave-9 2a), so only the SET of ops is stable.
+    expect(provider.calls.map((c) => c.op).sort()).toEqual(['content', 'meta']);
+    const metaCall = provider.calls.find((c) => c.op === 'meta');
+    const contentCall = provider.calls.find((c) => c.op === 'content');
+    expect(contentCall?.identityId).toBe(metaCall?.identityId);
   });
 
   it('emits UTF-8 filename* with a safe ASCII fallback', async () => {
@@ -712,6 +715,8 @@ describe('admission and SA verification', () => {
       provider.contentHandler = () => bytesUpstream('x');
       const res = await api(app, CONTENT);
       expect(res.status).toBe(expected);
+      // Metadata-check denials never reach a media open at all (coordinator
+      // M4 ruling): zero SA content calls, zero bytes.
       expect(contentCalls(provider)).toHaveLength(0);
     }
   });
@@ -739,7 +744,12 @@ describe('admission and SA verification', () => {
     const res = await api(app, CONTENT);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('from-sa-2-here------');
-    expect(contentCalls(provider)[0]?.identityId).toBe('sa-2');
+    const contents = contentCalls(provider);
+    // sa-1's metadata never passed, so it never opened media (M4): the one
+    // content call is sa-2's speculated open, and it is the served body.
+    expect(contents).toHaveLength(1);
+    expect(contents[0]?.identityId).toBe('sa-2');
+    expect(contents[0]?.signal?.aborted).toBe(false);
   });
 
   it('never rotates SAs on a file-level download restriction', async () => {
@@ -757,6 +767,7 @@ describe('admission and SA verification', () => {
     const res = await api(app, CONTENT);
     expect(res.status).not.toBe(200);
     expect(provider.calls.every((c) => c.identityId === 'sa-1')).toBe(true);
+    expect(contentCalls(provider)).toHaveLength(0);
   });
 
   it('never rotates SAs on a collapsed cooldown/rate-limit (R5)', async () => {
@@ -911,10 +922,8 @@ describe('thumbnail and export parity', () => {
     const res = await api(app, '/api/v1/mounts/m-1/files/f-1/thumbnail');
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('image/png');
-    // Reviewer F11: no per-route private cache override — the production
-    // middleware stamps `no-store` on every /api response (the test harness
-    // does not mount that middleware, so the header is simply absent here).
-    expect(res.headers.get('cache-control')).toBeNull();
+    // Wave-9 2c: a short private cache is permitted by spec §9.4.
+    expect(res.headers.get('cache-control')).toBe('private, max-age=300');
     expect(await res.text()).toBe('PNG-DATA');
     expect(provider.calls.at(-1)?.op).toBe('thumbnail');
   });
@@ -1038,6 +1047,7 @@ describe('reviewer fixes', () => {
     expect(
       ((await res.json()) as { error: { code: string } }).error.code,
     ).toBe('FILE_NOT_ACCESSIBLE');
+    // The shortcut check is a metadata verdict: media is never opened (M4).
     expect(contentCalls(provider)).toHaveLength(0);
   });
 
@@ -1087,7 +1097,7 @@ describe('reviewer fixes', () => {
     provider.contentHandler = () => bytesUpstream('x');
     const res = await api(app, CONTENT);
     // Every enabled SA reports the same unproven metadata; the answer is an
-    // upstream-unclear 502, and no body read is ever attempted.
+    // upstream-unclear 502 and no media open is ever attempted (M4).
     expect(res.status).toBe(502);
     expect(
       ((await res.json()) as { error: { code: string } }).error.code,
@@ -1215,8 +1225,10 @@ describe('My Drive folder mount: content containment', () => {
     const res = await api(app, CONTENT);
     expect(res.status).toBe(200);
     expect(await res.text()).toBe('hello from my drive!!!!!!');
-    // Bytes and metadata came from the SA; ancestors from the catalog writer.
-    expect(provider.calls.slice(0, 2).map((c) => c.op)).toEqual(['meta', 'content']);
+    // Bytes and metadata came from the SA; ancestors from the catalog
+    // writer. The media open overlaps verification (wave-9 2a) — order
+    // between 'meta' and 'content' is intentionally unspecified.
+    expect(provider.calls.map((c) => c.op).sort()).toEqual(['content', 'meta']);
     expect(catalog.metadataCalls.map((c) => c.ref.id)).toContain('dirA');
     expect(catalog.metadataCalls[0]!.writer.connectionId).toBe('conn-1');
   });
@@ -1243,11 +1255,12 @@ describe('My Drive folder mount: content containment', () => {
     expect(baseline.status).toBe(404);
     expect(baseline.code).toBe('FILE_NOT_ACCESSIBLE');
 
-    const scenarios: Array<{ name: string; meta: DriveFileMeta; setup: (c: FakeCatalogProvider) => void }> = [
+    const scenarios: Array<{ name: string; meta: DriveFileMeta; setup: (c: FakeCatalogProvider) => void; mediaCalls: number }> = [
       {
         name: 'parent unknown to the catalog connection',
         meta: myFileMeta({ parents: ['strangerDir'] }),
         setup: () => undefined,
+        mediaCalls: 1,
       },
       {
         name: 'SA sees no parent at all',
@@ -1257,16 +1270,21 @@ describe('My Drive folder mount: content containment', () => {
           return rest;
         })(),
         setup: () => undefined,
+        mediaCalls: 1,
       },
       {
         name: 'chain ends in a folder outside the mount',
         meta: myFileMeta({ parents: ['strangerDir'] }),
         setup: (c) => c.metas.set('strangerDir', folderMeta('strangerDir', [])),
+        mediaCalls: 1,
       },
       {
+        // A metadata-check denial (driveId under a My Drive mount): the
+        // media open must never start — zero calls, not an aborted one (M4).
         name: 'a Shared Drive file reported under a My Drive mount',
         meta: myFileMeta({ parents: [MY_ROOT], driveId: 'drive-OTHER' }),
         setup: () => undefined,
+        mediaCalls: 0,
       },
     ];
     for (const scenario of scenarios) {
@@ -1282,8 +1300,71 @@ describe('My Drive folder mount: content containment', () => {
       const res = await api(app, CONTENT);
       const got = await errorOf(res);
       expect(got, scenario.name).toEqual(baseline);
-      expect(contentCalls(provider), scenario.name).toHaveLength(0);
+      // Containment denials kill the speculated open (aborted, zero bytes
+      // read); metadata denials never open at all.
+      expect(contentCalls(provider), scenario.name).toHaveLength(scenario.mediaCalls);
+      if (scenario.mediaCalls === 1) {
+        expect(contentCalls(provider)[0]?.signal?.aborted, scenario.name).toBe(true);
+      }
     }
+  });
+
+  it('does not open media before the SA metadata check passes (M4)', async () => {
+    await seedBase();
+    const provider = new FakeReadProvider();
+    let releaseMeta: (meta: DriveFileMeta) => void = () => undefined;
+    provider.metaHandler = () =>
+      new Promise<DriveFileMeta>((resolve) => {
+        releaseMeta = resolve;
+      });
+    provider.contentHandler = () => bytesUpstream('late-bytes----------');
+    const { app } = makeHarness(userActor(adminUser), { provider });
+    const pending = api(app, CONTENT);
+    // While the SA metadata read is still in flight there must be no media
+    // call — the early open may only start after checkFileMeta passes.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(contentCalls(provider)).toHaveLength(0);
+    releaseMeta(defaultMeta());
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('late-bytes----------');
+    expect(contentCalls(provider)).toHaveLength(1);
+  });
+
+  it('aborts the speculated open and cancels its unread body when containment denies', async () => {
+    await seedBase();
+    await convertMountToMyDrive();
+    const catalog = new FakeCatalogProvider(); // parent 404s -> outside
+    const { app, provider } = makeHarness(userActor(adminUser), { oauth: catalog });
+    provider.metaHandler = () => myFileMeta();
+    let pulled = false;
+    let cancelled = false;
+    provider.contentHandler = () => ({
+      status: 200,
+      contentType: 'application/octet-stream',
+      body: new ReadableStream<Uint8Array>(
+        {
+          pull(ctl) {
+            pulled = true;
+            ctl.enqueue(encoder.encode('z'));
+          },
+          cancel() {
+            cancelled = true;
+          },
+        },
+        // HWM 0: the stream never pulls without a reader demanding bytes.
+        { highWaterMark: 0 },
+      ),
+    });
+    const res = await api(app, CONTENT);
+    expect(res.status).toBe(404);
+    const contents = contentCalls(provider);
+    expect(contents).toHaveLength(1);
+    expect(contents[0]?.signal?.aborted).toBe(true);
+    // dropEarly cancels the resolved body without ever pulling a byte.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(cancelled).toBe(true);
+    expect(pulled).toBe(false);
   });
 
   it('applies the same denial to thumbnails and records the probe as blocked', async () => {
@@ -1316,7 +1397,8 @@ describe('My Drive folder mount: content containment', () => {
     const res = await api(app, CONTENT);
     expect(res.status).toBe(502);
     expect(JSON.stringify(await res.json())).not.toContain('boom');
-    expect(contentCalls(provider)).toHaveLength(0);
+    expect(contentCalls(provider)).toHaveLength(1);
+    expect(contentCalls(provider)[0]?.signal?.aborted).toBe(true);
     // The failed proof is inconclusive, never "readable".
     const probe = await api(app, '/api/v1/mounts/m-1/files/f-1/readiness', { method: 'POST' });
     expect(((await probe.json()) as { readerAccessState: string }).readerAccessState).not.toBe('readable');
@@ -1334,7 +1416,9 @@ describe('My Drive folder mount: content containment', () => {
     provider.contentHandler = () => bytesUpstream('SHOULD-NOT-LEAK');
     const res = await api(app, CONTENT);
     expect(res.status).toBe(502);
-    expect(contentCalls(provider)).toHaveLength(0);
+    // The speculated open is aborted before any byte is read (wave-9 2a).
+    expect(contentCalls(provider)).toHaveLength(1);
+    expect(contentCalls(provider)[0]?.signal?.aborted).toBe(true);
     expect(catalog.metadataCalls).toHaveLength(0);
   });
 
@@ -1354,6 +1438,8 @@ describe('My Drive folder mount: content containment', () => {
       provider.contentHandler = () => bytesUpstream('x');
       const res = await api(app, CONTENT);
       expect([404, 502]).toContain(res.status);
+      // Trashed / canDownload=false are metadata verdicts: no media open
+      // is ever attempted (M4).
       expect(contentCalls(provider)).toHaveLength(0);
     }
   });

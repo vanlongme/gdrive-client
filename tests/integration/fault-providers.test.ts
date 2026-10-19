@@ -68,7 +68,8 @@ async function resetState() {
   for (const table of [
     'mount_drive_permissions',
     'upload_batch_nodes', 'upload_batches', 'upload_operations', 'file_readiness',
-    'mount_grants', 'mount_read_credentials', 'mounts', 'google_connections',
+    'mount_grants', 'mount_read_credentials', 'containment_verdicts',
+    'mounts', 'google_connections',
     'oauth_transactions', 'google_oauth_clients', 'service_accounts', 'user', 'app_settings',
   ]) {
     await env.DB.prepare(`DELETE FROM "${table}"`).run();

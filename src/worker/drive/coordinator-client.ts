@@ -16,6 +16,30 @@ const DO_ORIGIN = 'https://project-coordinator.internal';
 
 export type CoordinatorEnv = Pick<Env, 'PROJECT_COORDINATOR'>;
 
+/**
+ * Wave-9 step 1c: broadcast a cache purge to every project coordinator DO
+ * after an admin write that can change the maintenance flag. DO instances
+ * are keyed by project_id, so the purge enumerates known projects; a missed
+ * instance still expires within MAINTENANCE_CACHE_TTL_MS (2 s).
+ */
+export async function purgeCoordinatorMaintenance(
+  env: Pick<Env, 'PROJECT_COORDINATOR' | 'DB'>,
+): Promise<void> {
+  const rows = await env.DB.prepare(
+    'SELECT project_id FROM service_accounts ' +
+      'UNION SELECT project_id FROM google_oauth_clients',
+  ).all<{ project_id: string }>();
+  for (const row of rows.results) {
+    try {
+      await env.PROJECT_COORDINATOR.get(
+        env.PROJECT_COORDINATOR.idFromName(row.project_id),
+      ).fetch(`${DO_ORIGIN}/purge`, { method: 'POST' });
+    } catch {
+      // A dead DO instance is evicted anyway; its RAM cache dies with it.
+    }
+  }
+}
+
 export interface CoordinatorHealth {
   readonly cooldowns: readonly {
     scope_key: string;

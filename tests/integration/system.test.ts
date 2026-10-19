@@ -108,6 +108,7 @@ async function resetState() {
     'share_links',
     'mount_grants',
     'mount_read_credentials',
+    'containment_verdicts',
     'mounts',
     'audit_events',
     'oauth_transactions',
@@ -380,12 +381,21 @@ describe('system journey through createApp() with the fake Google boundary', () 
     expect(mediaCalls.every((r) => r.provider === 'service_account')).toBe(true);
 
     // 9. Read stays blocked for the uploader while SA membership is denied.
+    const mediaBeforeDenied = fake.requests.filter(
+      (r) => r.url.searchParams.get('alt') === 'media',
+    ).length;
     const denied = await api(
       app,
       `/api/v1/mounts/${mountView.id}/files/${fileId}/content`,
       { headers: { cookie: uploader } },
     );
     expect(denied.status).not.toBe(200);
+    // The SA metadata check fails, so the media fetch must never start
+    // (coordinator M4 ruling): zero media calls for the denied request.
+    expect(
+      fake.requests.filter((r) => r.url.searchParams.get('alt') === 'media')
+        .length,
+    ).toBe(mediaBeforeDenied);
 
     // 10. Membership fixed upstream; an explicit readiness re-probe flips the
     //     projection to readable.
@@ -418,6 +428,29 @@ describe('system journey through createApp() with the fake Google boundary', () 
     // Byte accounting: what the SA fetched equals what we uploaded.
     const putChunk = byteWrites.find((r) => r.method === 'PUT');
     expect(putChunk?.bytes).toBe(content.byteLength);
+
+    // 11b. Thumbnail through the real app: the global security-header
+    //     middleware must preserve the route's short PRIVATE cache
+    //     (review M1 — never public, never no-store).
+    fake.files.get(fileId)!.thumbnailLink =
+      'https://lh3.googleusercontent.com/thumb-1';
+    const thumb = await api(
+      app,
+      `/api/v1/mounts/${mountView.id}/files/${fileId}/thumbnail`,
+      { headers: { cookie: uploader } },
+    );
+    expect(thumb.status).toBe(200);
+    expect(thumb.headers.get('cache-control')).toBe('private, max-age=300');
+    expect(thumb.headers.get('content-type')).toBe('image/png');
+    await thumb.arrayBuffer();
+    // Error responses on the same path keep the global no-store.
+    const noThumb = await api(
+      app,
+      `/api/v1/mounts/${mountView.id}/files/${fake.driveId}/thumbnail`,
+      { headers: { cookie: uploader } },
+    );
+    expect(noThumb.status).not.toBe(200);
+    expect(noThumb.headers.get('cache-control')).toBe('no-store');
 
     // 12. Share -> admit without session -> revoke -> denied again.
     const share = await postJson(app, '/api/v1/shares', admin, {

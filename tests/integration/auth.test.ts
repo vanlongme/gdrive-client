@@ -8,6 +8,8 @@ import { ApiErrorBodySchema } from "../../src/shared/contracts/common";
 import { SessionViewSchema } from "../../src/shared/contracts/admin";
 import { AuthError, requireAdmin, requireUser } from "../../src/worker/auth/session";
 import { getAuthInstance } from "../../src/worker/auth/session";
+import { getAuth } from "../../src/worker/auth/better-auth";
+import { RequestTiming, timedEnv } from "../../src/worker/timing";
 
 const worker = exports.default;
 const TEST_MIGRATIONS = JSON.parse(
@@ -275,6 +277,20 @@ describe("authorization helpers", () => {
     expect(err).toBeInstanceOf(AuthError);
     expect((err as AuthError).status).toBe(403);
     expect((err as AuthError).code).toBe("FORBIDDEN");
+  });
+});
+
+describe("auth instance reuse (wave-9 L3)", () => {
+  it("returns the same instance across per-request timed env clones", async () => {
+    const e = env as unknown as Env;
+    const first = await getAuth(e, "https://auth-cache.test");
+    // Each request middleware clones env for D1 timing; the cache key must
+    // be the RAW env or every request rebuilds Better Auth.
+    const timed1 = timedEnv(e, new RequestTiming());
+    const timed2 = timedEnv(e, new RequestTiming());
+    expect(timed1).not.toBe(e);
+    expect(await getAuth(timed1, "https://auth-cache.test")).toBe(first);
+    expect(await getAuth(timed2, "https://auth-cache.test")).toBe(first);
   });
 });
 

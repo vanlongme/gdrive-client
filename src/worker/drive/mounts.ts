@@ -28,6 +28,7 @@ import { authorizeMount, type Actor, type MountAccess, type MountOperation } fro
 import { AuthError, getAuthSession } from '../auth/session';
 import { getBootstrapConfig } from '../security/bootstrap-config';
 import { readCanonicalOrigin } from '../auth/better-auth';
+import { getRequestHints } from '../timing';
 import type { ApiErrorCode } from '../../shared/contracts/common';
 import type { MountVisibility } from '../../shared/contracts/drive';
 import {
@@ -235,7 +236,15 @@ export async function resolveActor(
       'Worker bootstrap secrets are missing or malformed.',
     );
   }
-  if ((await readCanonicalOrigin(env.DB)) === null) {
+  // The app middleware resolves the settings row and session once per
+  // request and stashes them as request hints; without hints (unit-test
+  // harnesses) the reads happen exactly as before.
+  const hints = getRequestHints(request);
+  const canonicalOrigin =
+    hints === undefined
+      ? await readCanonicalOrigin(env.DB)
+      : hints.canonicalOrigin;
+  if (canonicalOrigin === null) {
     throw new AuthError(
       503,
       'SETUP_REQUIRED',
@@ -243,14 +252,25 @@ export async function resolveActor(
     );
   }
   let session;
-  try {
-    session = await getAuthSession(request, env);
-  } catch {
-    throw new AuthError(
-      503,
-      'AUTH_UNAVAILABLE',
-      'Authentication is unavailable.',
-    );
+  if (hints !== undefined) {
+    if (hints.session === 'error') {
+      throw new AuthError(
+        503,
+        'AUTH_UNAVAILABLE',
+        'Authentication is unavailable.',
+      );
+    }
+    session = hints.session;
+  } else {
+    try {
+      session = await getAuthSession(request, env);
+    } catch {
+      throw new AuthError(
+        503,
+        'AUTH_UNAVAILABLE',
+        'Authentication is unavailable.',
+      );
+    }
   }
   if (session === null) return { kind: 'public' };
   if (session.user.disabled) {
@@ -279,12 +299,19 @@ export async function requireMountAccess(
   operation: MountOperation,
   resolveActorFn: ResolveActorFn = resolveActor,
 ): Promise<MountAccessResult> {
-  const actor = await resolveActorFn(request, env);
-  const mount = await getMount(env.DB, mountId);
+  // Actor resolution and the mount read are independent: run them
+  // concurrently. The attach-only catch keeps a rejection on the loser
+  // from surfacing as an unhandled rejection when the winner throws first.
+  const actorP = resolveActorFn(request, env);
+  actorP.catch(() => undefined);
+  const mountP = getMount(env.DB, mountId);
+  mountP.catch(() => undefined);
+  const actor = await actorP;
+  const mount = await mountP;
   if (mount === null) {
     throw new ApiRequestError(404, 'NOT_FOUND', 'Mount not found.');
   }
-  const access = await authorizeMount(env.DB, actor, mountId);
+  const access = await authorizeMount(env.DB, actor, mountId, mount);
   if (access === null || !access.operations.has(operation)) {
     throw new ApiRequestError(
       403,
@@ -340,7 +367,7 @@ export async function listMountAccesses(
   for (const mountId of mountIds) {
     const mount = await getMount(db, mountId);
     if (mount === null) continue;
-    const access = await authorizeMount(db, actor, mountId);
+    const access = await authorizeMount(db, actor, mountId, mount);
     if (access === null) continue;
     entries.push({ mount, access });
   }

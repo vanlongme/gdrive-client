@@ -19,6 +19,7 @@ import {
   mountScopeOf,
   oauthParentLookup,
   ResourceScopeError,
+  type SharedVerdictStore,
 } from './containment';
 import type {
   DriveFileMeta,
@@ -38,6 +39,8 @@ export interface ResolveResourceContext {
   readonly writer: ResolvedWriter;
   readonly provider: OAuthCatalogWriteProvider;
   readonly signal?: AbortSignal;
+  /** Cross-isolate containment verdicts (wave-9 step 2b); optional. */
+  readonly shared?: SharedVerdictStore;
 }
 
 export interface ResolvedResource {
@@ -77,7 +80,7 @@ export async function resolveResource(
       ref: current,
       ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
     });
-    await assertInMount(scope, meta, lookup);
+    await assertInMount(scope, meta, lookup, ctx.shared);
     if (visited.has(meta.id)) {
       throw new ResourceScopeError(
         'shortcut-cycle',

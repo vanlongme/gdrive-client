@@ -39,21 +39,26 @@ import { handleThumbnail } from '../media/thumbnail';
 import { mintMediaTicket } from '../security/tickets';
 import {
   admitFileAccess,
-  admitFileRead,
+  admitFileRequest,
   assertQueryParams,
   contentErrorResponse,
   downstreamAbortableBody,
   fail,
   linkRequestSignal,
+  NON_FAILOVER_REASONS,
   openWithFailover,
   providerFor,
   requireDriveId,
   requireParam,
   resolveRequestActor,
+  sharedVerdictStoreFor,
+  tokenSourceFor,
   verifiedFileForRead,
   type ContentRouteDeps,
   type RouterContext,
 } from './content-access';
+import { timingFor } from '../timing';
+import type { ReadIdentity } from '../drive/types';
 import {
   buildContentDisposition,
   resolveDisposition,
@@ -223,13 +228,78 @@ async function handleContent(c: RouterContext, deps: ContentRouteDeps) {
     const mode = parseContentMode(c);
     const requestedDisposition = parseDispositionParam(c);
 
-    const admitted = await admitFileRead(c, deps, {
+    const isHead = c.req.method === 'HEAD';
+    const hasRange = c.req.raw.headers.get('range') !== null;
+    const admitted = await admitFileRequest(c, deps, {
       revisionId: mode.kind === 'revision' ? mode.revisionId : undefined,
     });
-    const { verified } = admitted;
     const provider = providerFor(c, deps);
-    const isHead = c.req.method === 'HEAD';
     const fileId = requireDriveId(requireParam(c, 'fileId'), 'fileId');
+
+    // Wave-9 overlap (non-Range current-content GET only): the media open
+    // starts under the identity whose SA metadata just passed checkFileMeta
+    // (coordinator M4 ruling) and overlaps only the My Drive containment
+    // walk. The early body is NEVER read and never returned before the
+    // verdict — on denial, a different admitted identity or a
+    // resource-keyed ref it is aborted and the normal failover path runs.
+    const controller = new AbortController();
+    linkRequestSignal(c.req.raw, controller);
+    const overlap =
+      !isHead && !hasRange && mode.kind === 'current' && admitted.identities.length > 0;
+    // The early open rides its own abort scope, chained to the request: a
+    // downstream disconnect kills it, but discarding it on denial or an
+    // identity/ref mismatch must never abort the fallback open below.
+    const earlyCtl = new AbortController();
+    controller.signal.addEventListener('abort', () => earlyCtl.abort(), {
+      once: true,
+    });
+    let earlyMedia: Promise<UpstreamContent> | undefined;
+    let earlyIdentity: ReadIdentity | undefined;
+    const onMetaVerified = overlap
+      ? (v: { readonly meta: DriveFileMeta; readonly identity: ReadIdentity }) => {
+          earlyIdentity = v.identity;
+          earlyMedia = provider.openContent({
+            identity: v.identity,
+            ref: { id: fileId },
+            signal: earlyCtl.signal,
+          });
+          // Attach-only catch (L1): a rejection stays observable at the
+          // `await earlyMedia` below without ever going unhandled.
+          earlyMedia.catch(() => undefined);
+        }
+      : undefined;
+    const dropEarly = (): void => {
+      if (earlyMedia === undefined) return;
+      earlyCtl.abort();
+      const pending = earlyMedia;
+      void pending
+        .then((upstream) => upstream.body.cancel())
+        .catch(() => undefined);
+    };
+
+    let verified;
+    try {
+      verified = await verifiedFileForRead(
+        provider,
+        c.env,
+        admitted.mount,
+        fileId,
+        c.req.raw.signal,
+        deps.oauthProvider,
+        {
+          tokenSource: tokenSourceFor(c, c.env),
+          timing: timingFor(c.req.raw),
+          shared: sharedVerdictStoreFor(c),
+          identities: admitted.identities,
+          ...(onMetaVerified === undefined ? {} : { onMetaVerified }),
+        },
+      );
+    } catch (err) {
+      // Denial: kill the in-flight upstream request and, if it already
+      // resolved, close the untouched body. Zero bytes are read either way.
+      dropEarly();
+      throw err;
+    }
 
     let size: bigint | undefined;
     let revisionId: string | undefined;
@@ -338,23 +408,58 @@ async function handleContent(c: RouterContext, deps: ContentRouteDeps) {
 
     const upstreamRange = plan.upstream;
 
-    const controller = new AbortController();
-    linkRequestSignal(c.req.raw, controller);
-    const upstream = await openWithFailover(
-      provider,
-      admitted.mount,
-      fileId,
-      verified,
-      controller.signal,
-      (identity, ref) =>
-        provider.openContent({
-          identity,
-          ref,
-          ...(upstreamRange === undefined ? {} : { range: upstreamRange }),
-          ...(revisionId === undefined ? {} : { revisionId }),
-          signal: controller.signal,
-        }),
-    );
+    const open = (identity: ReadIdentity, ref: typeof verified.ref) =>
+      provider.openContent({
+        identity,
+        ref,
+        ...(upstreamRange === undefined ? {} : { range: upstreamRange }),
+        ...(revisionId === undefined ? {} : { revisionId }),
+        signal: controller.signal,
+      });
+
+    // The early media open is reusable only when the verdict kept the same
+    // pool identity and no resource key — a keyed ref or a failed-over SA
+    // needs a fresh open (the early body is then cancelled, never read).
+    const earlyUsable =
+      earlyMedia !== undefined &&
+      earlyIdentity !== undefined &&
+      earlyIdentity.serviceAccountId === verified.identity.serviceAccountId &&
+      verified.meta.resourceKey === undefined &&
+      upstreamRange === undefined &&
+      revisionId === undefined;
+    let upstream: UpstreamContent;
+    if (earlyUsable) {
+      try {
+        upstream = await earlyMedia!;
+      } catch (err) {
+        // Same terminal taxonomy as openWithFailover: non-eligible reasons
+        // propagate, eligible ones fall through to the bounded retry path.
+        if (
+          !(err instanceof DriveError) ||
+          NON_FAILOVER_REASONS.has(err.reason)
+        ) {
+          throw err;
+        }
+        upstream = await openWithFailover(
+          provider,
+          admitted.mount,
+          fileId,
+          verified,
+          controller.signal,
+          open,
+        );
+      }
+    } else {
+      dropEarly();
+      upstream = await openWithFailover(
+        provider,
+        admitted.mount,
+        fileId,
+        verified,
+        controller.signal,
+        open,
+      );
+    }
     relayContentHeaders(headers, upstream, size);
     // Disposition is computed against the DELIVERED type (reviewer F3): the
     // upstream can answer a different Content-Type than metadata promised —

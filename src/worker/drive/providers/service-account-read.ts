@@ -59,7 +59,7 @@ export function createServiceAccountReadProvider(
     identity: ReadIdentity,
     operation: string,
     run: (bearer: string) => Promise<T>,
-    options: { fileId?: string } = {},
+    options: { fileId?: string; signal?: AbortSignal } = {},
   ): Promise<T> {
     return callDriveApi(
       tokenSource,
@@ -180,29 +180,33 @@ export function createServiceAccountReadProvider(
           headers,
           signal: input.signal,
         }),
-      { fileId: input.ref.id });
+      { fileId: input.ref.id, signal: input.signal });
       return parseUpstreamContent(res, operation);
     },
 
     async openThumbnail(input: OpenThumbnailInput): Promise<UpstreamContent> {
+      let link: unknown = input.thumbnailLink;
       const metadataOperation = 'sa.files.get';
-      const file = drivePathSegment(input.ref.id, metadataOperation);
-      const json = await authed(input.identity, metadataOperation, (bearer) =>
-        sendJson(
-          transport,
-          {
-            operation: metadataOperation,
-            token: bearer,
-            path: `/drive/v3/files/${file}`,
-            query: { fields: 'thumbnailLink' },
-            headers: resourceKeyHeaders(input.ref),
-            signal: input.signal,
-          },
-          metadataOperation,
-          (parsed) => parsed,
-        ),
-      { fileId: input.ref.id });
-      const link = (json as Record<string, unknown>).thumbnailLink;
+      if (link === undefined) {
+        // Legacy path: the caller did not carry an admission thumbnailLink.
+        const file = drivePathSegment(input.ref.id, metadataOperation);
+        const json = await authed(input.identity, metadataOperation, (bearer) =>
+          sendJson(
+            transport,
+            {
+              operation: metadataOperation,
+              token: bearer,
+              path: `/drive/v3/files/${file}`,
+              query: { fields: 'thumbnailLink' },
+              headers: resourceKeyHeaders(input.ref),
+              signal: input.signal,
+            },
+            metadataOperation,
+            (parsed) => parsed,
+          ),
+        { fileId: input.ref.id });
+        link = (json as Record<string, unknown>).thumbnailLink;
+      }
       if (typeof link !== 'string' || link === '') {
         throw new DriveError(
           'not-found',

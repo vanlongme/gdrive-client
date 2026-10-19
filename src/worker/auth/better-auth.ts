@@ -26,6 +26,7 @@
 
 import { betterAuth } from 'better-auth';
 import { admin } from 'better-auth/plugins/admin';
+import { rawEnvOf } from '../timing';
 
 const textEncoder = new TextEncoder();
 
@@ -108,6 +109,10 @@ export async function createAuth(
       useSecureCookies: true,
       defaultCookieAttributes: { httpOnly: true, sameSite: 'lax' },
       ipAddress: { ipAddressHeaders: ['cf-connecting-ip'] },
+      // The pinned adapter is the Kysely D1 dialect, which implements
+      // findOne/findMany joins: session+user resolve in one query instead
+      // of two (wave-9 read-path latency).
+      database: { joins: true },
     },
     telemetry: { enabled: false },
   });
@@ -142,18 +147,28 @@ const authCache = new WeakMap<AuthFactoryEnv, Map<string, Promise<AppAuth>>>();
  * origin happens on every call, so post-setup requests build a correctly
  * pinned instance even inside a warm isolate that served pre-setup traffic.
  */
-export function getAuth(env: AuthFactoryEnv): Promise<AppAuth> {
+export function getAuth(
+  env: AuthFactoryEnv,
+  canonicalOriginHint?: string | null,
+): Promise<AppAuth> {
   return (async () => {
-    const canonicalOrigin = await readCanonicalOrigin(env.DB);
-    let byOrigin = authCache.get(env);
+    // The request middleware hands us a timed env CLONE per request: key
+    // the cache on the raw env and build against it, or the WeakMap misses
+    // every time and the instance is rebuilt per request (review L3).
+    const raw = rawEnvOf(env);
+    const canonicalOrigin =
+      canonicalOriginHint === undefined
+        ? await readCanonicalOrigin(raw.DB)
+        : canonicalOriginHint;
+    let byOrigin = authCache.get(raw);
     if (byOrigin === undefined) {
       byOrigin = new Map();
-      authCache.set(env, byOrigin);
+      authCache.set(raw, byOrigin);
     }
     const key = canonicalOrigin ?? '';
     let instance = byOrigin.get(key);
     if (instance === undefined) {
-      instance = createAuth(env, canonicalOrigin);
+      instance = createAuth(raw, canonicalOrigin);
       byOrigin.set(key, instance);
     }
     return instance;

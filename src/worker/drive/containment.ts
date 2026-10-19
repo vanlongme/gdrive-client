@@ -113,20 +113,20 @@ function cacheKey(scope: MountScope, folderId: string): string {
   return `${scope.mountId}:${folderId}`;
 }
 
-function cacheGet(scope: MountScope, folderId: string, now: number): boolean | undefined {
+function cacheGet(scope: MountScope, folderId: string, now: number): CacheEntry | undefined {
   const key = cacheKey(scope, folderId);
   const entry = cache.get(key);
   if (entry === undefined) return undefined;
   cache.delete(key);
   if (entry.expiresAt <= now) return undefined;
   cache.set(key, entry); // refresh recency
-  return entry.inMount;
+  return entry;
 }
 
-function cacheSet(scope: MountScope, folderId: string, inMount: boolean, now: number): void {
+function cacheSet(scope: MountScope, folderId: string, inMount: boolean, expiresAt: number): void {
   const key = cacheKey(scope, folderId);
   cache.delete(key);
-  cache.set(key, { inMount, expiresAt: now + CONTAINMENT_TTL_MS });
+  cache.set(key, { inMount, expiresAt });
   while (cache.size > CONTAINMENT_CACHE_MAX) {
     const oldest = cache.keys().next();
     if (oldest.done === true) break;
@@ -143,6 +143,84 @@ export function resetContainmentCacheForTests(): void {
   cache.clear();
 }
 
+// ---------------------------------------------------------------------------
+// Cross-isolate positive verdicts (wave 9 step 2b). The per-isolate LRU
+// above dies with the isolate; a D1 table shares "folder is on a path to the
+// mount root" verdicts across isolates for up to 60 s. NEGATIVE verdicts are
+// never shared: a folder moved out of the mount elsewhere must be re-walked
+// locally rather than poison every isolate. App-initiated creates/trashes
+// invalidate via SharedVerdictStore.invalidate; external Drive changes are
+// seen at TTL expiry (same accepted window as the isolate cache).
+// ---------------------------------------------------------------------------
+
+export interface SharedVerdictStore {
+  /** The live row's expiry when a positive verdict exists; `undefined` = miss. */
+  get(
+    scope: MountScope,
+    folderId: string,
+  ): Promise<{ readonly expiresAt: number } | undefined>;
+  /**
+   * Persist positive verdicts for all folders on the walked path. Derived
+   * rows never outlive the verdict they were proven from: `expiresAt` caps
+   * the stored expiry (review M2).
+   */
+  set(
+    scope: MountScope,
+    folderIds: readonly string[],
+    expiresAt?: number,
+  ): Promise<void>;
+  invalidate(scope: MountScope, folderId: string): Promise<void>;
+}
+
+export const SHARED_VERDICT_TTL_MS = 60_000;
+
+export function createD1VerdictStore(
+  db: D1Database,
+  options: { ttlMs?: number; now?: () => number } = {},
+): SharedVerdictStore {
+  const ttlMs = options.ttlMs ?? SHARED_VERDICT_TTL_MS;
+  const now = options.now ?? Date.now;
+  return {
+    async get(scope, folderId) {
+      const row = await db
+        .prepare(
+          'SELECT expires_at FROM containment_verdicts ' +
+            'WHERE mount_id = ? AND root_folder_id = ? AND folder_id = ? AND expires_at > ?',
+        )
+        .bind(scope.mountId, scope.rootFolderId, folderId, now())
+        .first<{ expires_at: number }>();
+      return row === null ? undefined : { expiresAt: row.expires_at };
+    },
+    async set(scope, folderIds, expiresAt) {
+      if (folderIds.length === 0) return;
+      const expiry = Math.min(now() + ttlMs, expiresAt ?? now() + ttlMs);
+      const statements = folderIds.map((folderId) =>
+        db
+          .prepare(
+            'INSERT OR REPLACE INTO containment_verdicts ' +
+              '(mount_id, root_folder_id, folder_id, expires_at) VALUES (?, ?, ?, ?)',
+          )
+          .bind(scope.mountId, scope.rootFolderId, folderId, expiry),
+      );
+      // Expired rows are pruned on every write so the table stays bounded.
+      statements.push(
+        db
+          .prepare('DELETE FROM containment_verdicts WHERE expires_at <= ?')
+          .bind(now()),
+      );
+      await db.batch(statements);
+    },
+    async invalidate(scope, folderId) {
+      await db
+        .prepare(
+          'DELETE FROM containment_verdicts WHERE mount_id = ? AND folder_id = ?',
+        )
+        .bind(scope.mountId, folderId)
+        .run();
+    },
+  };
+}
+
 function isNotFound(err: unknown): boolean {
   return err instanceof DriveError && (err.reason === 'not-found' || err.status === 404);
 }
@@ -152,10 +230,13 @@ function isNotFound(err: unknown): boolean {
  * Returns the verdict and caches it for every folder looked up on the way.
  * Upstream failures other than 404 propagate and cache nothing.
  */
-async function walkToRoot(scope: MountScope, start: string | undefined, lookup: ParentLookup): Promise<boolean> {
+async function walkToRoot(scope: MountScope, start: string | undefined, lookup: ParentLookup, shared?: SharedVerdictStore): Promise<boolean> {
   const path: string[] = [];
   let current = start;
   let verdict = false;
+  // The expiry of the cache row the walk ended on: derived verdicts never
+  // outlive the row they were proven from (review M2).
+  let hitExpiresAt: number | undefined;
   for (let hops = 0; ; hops++) {
     if (current === undefined) break;
     if (current === scope.rootFolderId) {
@@ -164,10 +245,29 @@ async function walkToRoot(scope: MountScope, start: string | undefined, lookup: 
     }
     const cached = cacheGet(scope, current, Date.now());
     if (cached !== undefined) {
-      verdict = cached;
+      verdict = cached.inMount;
+      hitExpiresAt = cached.expiresAt;
       break;
     }
     if (hops >= CONTAINMENT_MAX_DEPTH) break;
+    // Cross-isolate positive verdicts: only 'inside' is ever shared, so a
+    // hit ends the walk affirmatively; a miss proves nothing either way.
+    // The store is queried once — for the start folder — so a cold or
+    // negative walk gains no sequential D1 round trip per hop, and a store
+    // failure (D1 down, or migration 0009 unapplied) degrades to a miss
+    // and the live walk decides (review M3).
+    if (hops === 0 && shared !== undefined) {
+      try {
+        const hit = await shared.get(scope, current);
+        if (hit !== undefined) {
+          verdict = true;
+          hitExpiresAt = hit.expiresAt;
+          break;
+        }
+      } catch {
+        // Degraded to a miss.
+      }
+    }
     path.push(current);
     let folder: ParentMeta;
     try {
@@ -180,22 +280,31 @@ async function walkToRoot(scope: MountScope, start: string | undefined, lookup: 
     current = folder.parents?.[0];
   }
   const now = Date.now();
-  for (const folderId of path) cacheSet(scope, folderId, verdict, now);
+  const expiresAt =
+    hitExpiresAt === undefined
+      ? now + CONTAINMENT_TTL_MS
+      : Math.min(now + CONTAINMENT_TTL_MS, hitExpiresAt);
+  for (const folderId of path) cacheSet(scope, folderId, verdict, expiresAt);
+  if (verdict && shared !== undefined && path.length > 0) {
+    // Positive verdicts only: the shared store proves membership, never
+    // exclusion. A failed D1 write degrades to isolate-only caching.
+    await shared.set(scope, path, expiresAt).catch(() => undefined);
+  }
   return verdict;
 }
 
-export async function isInMount(scope: MountScope, meta: ParentMeta, lookup: ParentLookup): Promise<boolean> {
+export async function isInMount(scope: MountScope, meta: ParentMeta, lookup: ParentLookup, shared?: SharedVerdictStore): Promise<boolean> {
   if (meta.trashed === true) return false;
   if (scope.driveId !== null) return meta.driveId === scope.driveId;
   if (meta.driveId !== undefined) return false;
   if (meta.id === scope.rootFolderId) return true;
-  return walkToRoot(scope, meta.parents?.[0], lookup);
+  return walkToRoot(scope, meta.parents?.[0], lookup, shared);
 }
 
 /** Throws ResourceScopeError('trashed') or ResourceScopeError('outside-mount'). */
-export async function assertInMount(scope: MountScope, meta: ParentMeta, lookup: ParentLookup): Promise<void> {
+export async function assertInMount(scope: MountScope, meta: ParentMeta, lookup: ParentLookup, shared?: SharedVerdictStore): Promise<void> {
   if (meta.trashed === true) throw new ResourceScopeError('trashed', 'resource is trashed');
-  if (!(await isInMount(scope, meta, lookup))) {
+  if (!(await isInMount(scope, meta, lookup, shared))) {
     throw new ResourceScopeError('outside-mount', 'resource is outside the mount');
   }
 }

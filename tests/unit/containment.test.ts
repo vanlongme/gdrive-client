@@ -15,6 +15,7 @@ import {
   type MountScope,
   type ParentLookup,
   type ParentMeta,
+  type SharedVerdictStore,
 } from '../../src/worker/drive/containment';
 import { ResourceScopeError as ReexportedScopeError } from '../../src/worker/drive/shortcuts';
 import { DriveError } from '../../src/worker/drive/errors';
@@ -257,6 +258,124 @@ describe('verdict cache', () => {
     await check('d1');
     expect(calls.length).toBe(CONTAINMENT_CACHE_MAX + 2);
     expect(calls.at(-1)).toBe('d1');
+  });
+});
+
+describe('shared verdict store (wave-9 2b review fixes)', () => {
+  /** In-memory SharedVerdictStore recording calls and honouring expiry. */
+  function memoryStore(now: () => number = Date.now) {
+    const rows = new Map<string, number>();
+    const getCalls: string[] = [];
+    const setCalls: { ids: string[]; expiresAt: number | undefined }[] = [];
+    let failGet = false;
+    const store: SharedVerdictStore = {
+      async get(scope, folderId) {
+        getCalls.push(folderId);
+        if (failGet) throw new Error('D1 read failed');
+        const expiresAt = rows.get(`${scope.mountId}:${folderId}`);
+        return expiresAt !== undefined && expiresAt > now()
+          ? { expiresAt }
+          : undefined;
+      },
+      async set(scope, folderIds, expiresAt) {
+        setCalls.push({ ids: [...folderIds], expiresAt });
+        const expiry = expiresAt ?? now() + 60_000;
+        for (const id of folderIds) {
+          rows.set(`${scope.mountId}:${id}`, expiry);
+        }
+      },
+      async invalidate() {},
+    };
+    return {
+      store,
+      rows,
+      getCalls,
+      setCalls,
+      setFailGet: (v: boolean) => {
+        failGet = v;
+      },
+    };
+  }
+
+  it('a shared.get error degrades to a miss and the live walk still decides', async () => {
+    const { store } = memoryStore();
+    store.get = async () => {
+      throw new Error('D1 read failed');
+    };
+    const { lookup, calls } = tree(chain(2));
+    expect(await isInMount(MY, file('f1'), lookup, store)).toBe(true);
+    expect(calls).toEqual(['f1', 'f2']);
+
+    const deny = tree([{ id: 'a', parents: ['nowhere'] }, { id: 'nowhere' }]);
+    expect(await isInMount(MY, file('a'), deny.lookup, store)).toBe(false);
+    expect(deny.calls).toEqual(['a', 'nowhere']);
+  });
+
+  it('queries the shared store for the start folder only — never per hop', async () => {
+    const { store, getCalls } = memoryStore();
+    const { lookup, calls } = tree(chain(4));
+    expect(await isInMount(MY, file('f1'), lookup, store)).toBe(true);
+    expect(calls).toEqual(['f1', 'f2', 'f3', 'f4']);
+    expect(getCalls).toEqual(['f1']);
+  });
+
+  it('a shared hit for the start folder ends the walk affirmatively', async () => {
+    const t0 = 1_760_000_000_000;
+    const { store, rows } = memoryStore(() => t0);
+    rows.set('m-my:f1', t0 + 30_000);
+    const { lookup, calls } = tree(chain(2));
+    expect(await isInMount(MY, file('f1'), lookup, store)).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  it('derived verdicts never expire later than the isolate-cache row they were proven from', async () => {
+    const t0 = 1_760_000_000_000;
+    const now = vi.spyOn(Date, 'now').mockReturnValue(t0);
+    const { lookup, calls, byId } = tree([
+      ...chain(2),
+      { id: 'd1', parents: ['d2'] },
+      { id: 'd2', parents: ['f1'] },
+    ]);
+
+    // t0: prove f1/f2 -> isolate entries expire at t0 + TTL.
+    expect(await isInMount(MY, file('f1'), lookup)).toBe(true);
+    expect(calls).toEqual(['f1', 'f2']);
+
+    // t0 + 30s: a fresh branch joins at f1. The derived verdicts for d1/d2
+    // must be capped at the hit row's expiry (t0 + TTL), not t0 + 30s + TTL.
+    now.mockReturnValue(t0 + 30_000);
+    expect(await isInMount(MY, file('d1'), lookup)).toBe(true);
+    expect(calls).toEqual(['f1', 'f2', 'd1', 'd2']);
+
+    // t0 + TTL + 1: the original verdict is gone, so d1's derived verdict
+    // must be gone too — the walk re-runs instead of riding a stale row.
+    now.mockReturnValue(t0 + CONTAINMENT_TTL_MS + 1);
+    expect(await isInMount(MY, file('d1'), lookup)).toBe(true);
+    expect(calls).toEqual(['f1', 'f2', 'd1', 'd2', 'd1', 'd2', 'f1', 'f2']);
+    void byId;
+  });
+
+  it('writes shared rows capped at the hit expiry (M2)', async () => {
+    const t0 = 1_760_000_000_000;
+    const now = vi.spyOn(Date, 'now').mockReturnValue(t0);
+    const { store, setCalls } = memoryStore(() => now());
+    const { lookup } = tree([
+      ...chain(2),
+      { id: 'd1', parents: ['f1'] },
+    ]);
+
+    // Populate the isolate cache for f1 at t0 (expires t0 + TTL) and record
+    // nothing shared yet.
+    expect(await isInMount(MY, file('f1'), lookup, store)).toBe(true);
+    setCalls.length = 0;
+
+    // At t0+30s a new branch hits the isolate row for f1; the shared write
+    // for d1 must carry the hit row's expiry, not a fresh 60 s.
+    now.mockReturnValue(t0 + 30_000);
+    expect(await isInMount(MY, file('d1'), lookup, store)).toBe(true);
+    expect(setCalls).toHaveLength(1);
+    expect(setCalls[0]!.ids).toEqual(['d1']);
+    expect(setCalls[0]!.expiresAt).toBe(t0 + CONTAINMENT_TTL_MS);
   });
 });
 

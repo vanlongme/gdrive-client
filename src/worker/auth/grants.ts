@@ -35,6 +35,8 @@ interface MountRow {
   visibility: string;
 }
 
+export type { MountRow };
+
 const OPERATIONS_BY_ROLE: Record<MountAccess['role'], ReadonlySet<MountOperation>> = {
   admin: new Set<MountOperation>(['read', 'upload', 'admin']),
   uploader: new Set<MountOperation>(['read', 'upload']),
@@ -85,11 +87,16 @@ export async function authorizeMount(
   db: D1Database,
   actor: Actor,
   mountId: string,
+  knownMount?: MountRow,
 ): Promise<MountAccess | null> {
-  const mount = await db
-    .prepare('SELECT id, visibility FROM mounts WHERE id = ?')
-    .bind(mountId)
-    .first<MountRow>();
+  // The caller that already fetched the mount row passes it through so a
+  // request never reads the same row twice.
+  const mount =
+    knownMount ??
+    (await db
+      .prepare('SELECT id, visibility FROM mounts WHERE id = ?')
+      .bind(mountId)
+      .first<MountRow>());
   if (mount === null) return null;
 
   if (actor.kind === 'user') {

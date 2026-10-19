@@ -17,7 +17,13 @@ import {
 import { readCanonicalOrigin } from "./auth/better-auth";
 import { handleAuthRequest } from "./auth/routes";
 import { runSetup } from "./auth/setup";
-import { AuthError, requireUser } from "./auth/session";
+import { AuthError, getAuthSession, requireUser } from "./auth/session";
+import {
+  RequestTiming,
+  setRequestHints,
+  setRequestTiming,
+  timedEnv,
+} from "./timing";
 import { createOAuthRouter } from "./drive/oauth/routes";
 import { createCatalogRouter } from "./drive/catalog";
 import { createContentRouter } from "./transfers/download";
@@ -74,6 +80,31 @@ const PROTECTED_API_PREFIXES = [
 // Setup surface itself needs valid secrets to validate the claim token.
 const BOOTSTRAP_GATED_PATHS = new Set(["/api/v1/setup", "/api/v1/setup/status"]);
 
+/**
+ * Session-authenticated surfaces: the request-context middleware resolves
+ * the app_settings row, the Better Auth session and the latency recorder
+ * once per request for these prefixes. /api/v1/p and /api/v1/site are
+ * deliberately excluded (anonymous public surface — no session lookup, no
+ * Server-Timing ever), and /api/auth runs Better Auth's own session path.
+ */
+const SESSION_RESOLVED_PREFIXES = [
+  "/api/v1/mounts",
+  "/api/v1/uploads",
+  "/api/v1/upload-batches",
+  "/api/v1/folders",
+  "/api/v1/media-packages",
+  "/api/v1/shares",
+  "/api/v1/public-links",
+  "/api/v1/admin",
+  "/api/v1/session",
+] as const;
+
+function isSessionResolvedPath(path: string): boolean {
+  return SESSION_RESOLVED_PREFIXES.some(
+    (prefix) => path === prefix || path.startsWith(`${prefix}/`),
+  );
+}
+
 function isProtectedApiPath(path: string): boolean {
   return PROTECTED_API_PREFIXES.some(
     (prefix) => path === prefix || path.startsWith(`${prefix}/`),
@@ -97,6 +128,8 @@ interface AppSettingsRow {
 
 interface ErrorVariables {
   requestId: string;
+  appSettings?: AppSettingsRead;
+  actorIsAdmin?: boolean;
 }
 
 type AppContext = Context<{ Bindings: Env; Variables: ErrorVariables }>;
@@ -118,21 +151,40 @@ function apiError(
  * reported as "unavailable" — never as uninitialized — so a query failure can
  * never silently reopen setup or unlock protected routes.
  */
-export async function readSetupState(db: D1Database): Promise<SetupStateRead> {
+export interface AppSettingsRead {
+  readonly row: AppSettingsRow | null;
+  /** True when the read itself failed — callers must fail closed. */
+  readonly error: boolean;
+}
+
+/** Read the app_settings singleton row once; errors surface, never vanish. */
+export async function readAppSettings(
+  db: D1Database,
+): Promise<AppSettingsRead> {
   try {
     const row = await db
       .prepare(
         "SELECT id, setup_state, canonical_origin, version FROM app_settings WHERE id = 1",
       )
       .first<AppSettingsRow>();
-    if (row === null) return "uninitialized";
-    if (row.id !== 1 || typeof row.version !== "number" || !SETUP_STATES.has(row.setup_state)) {
-      return "unavailable";
-    }
-    return row.setup_state as SetupState;
+    return { row, error: false };
   } catch {
+    return { row: null, error: true };
+  }
+}
+
+function setupStateFromRead(read: AppSettingsRead): SetupStateRead {
+  if (read.error) return "unavailable";
+  const row = read.row;
+  if (row === null) return "uninitialized";
+  if (row.id !== 1 || typeof row.version !== "number" || !SETUP_STATES.has(row.setup_state)) {
     return "unavailable";
   }
+  return row.setup_state as SetupState;
+}
+
+export async function readSetupState(db: D1Database): Promise<SetupStateRead> {
+  return setupStateFromRead(await readAppSettings(db));
 }
 
 export function createApp() {
@@ -148,6 +200,15 @@ export function createApp() {
     if (path === "/api/v1/p" || path.startsWith("/api/v1/p/")) {
       c.header("X-Robots-Tag", "noindex");
     }
+    // Thumbnails keep the short PRIVATE cache the route set — the global
+    // no-store overwrote it (review M1). Private, never public: the bytes
+    // passed session admission. Errors stay no-store.
+    if (
+      c.res.status === 200 &&
+      /^\/api\/v1\/mounts\/[^/]+\/files\/[^/]+\/thumbnail$/.test(path)
+    ) {
+      c.header("Cache-Control", "private, max-age=300");
+    }
     // The site logo is the one cacheable API response: restore the short
     // shared cache the global no-store overwrote, plus the SVG sandbox CSP.
     if (path === "/api/v1/site/logo") {
@@ -158,6 +219,68 @@ export function createApp() {
           "default-src 'none'; style-src 'unsafe-inline'; sandbox",
         );
       }
+    }
+  });
+
+  // Request context (wave 9): the settings row, session and latency
+  // recorder resolve once here and are carried as per-request hints, so
+  // the preamble of protected routes does not re-read them. /api/v1/p and
+  // /api/v1/site are anonymous surfaces: no session work, no Server-Timing.
+  app.use("/api/*", async (c, next) => {
+    const path = c.req.path;
+    const gated = BOOTSTRAP_GATED_PATHS.has(path) || isProtectedApiPath(path);
+    if (!gated) return next();
+
+    const sessionPath = isSessionResolvedPath(path);
+    const timing = sessionPath ? new RequestTiming() : undefined;
+    if (timing !== undefined) {
+      setRequestTiming(c.req.raw, timing);
+      // Every downstream c.env.DB access is counted through the timed
+      // clone; consumers with env-keyed caches resolve the raw env via
+      // rawEnvOf (better-auth.ts).
+      c.env = timedEnv(c.env, timing);
+    }
+    const settings = await readAppSettings(c.env.DB);
+    c.set("appSettings", settings);
+    const canonicalOrigin =
+      !settings.error && setupStateFromRead(settings) === "complete"
+        ? (settings.row?.canonical_origin ?? null)
+        : null;
+
+    let isAdmin = false;
+    if (sessionPath && canonicalOrigin !== null) {
+      const bootstrap = getBootstrapConfig(c.env);
+      if (bootstrap.ok) {
+        // Origin hint lands first so the auth adapter does not re-read the
+        // settings row the middleware just fetched.
+        setRequestHints(c.req.raw, { canonicalOrigin, session: null });
+        let session: Awaited<ReturnType<typeof getAuthSession>> | "error";
+        try {
+          session = await getAuthSession(c.req.raw, c.env);
+        } catch {
+          session = "error";
+        }
+        setRequestHints(c.req.raw, {
+          canonicalOrigin,
+          session,
+        });
+        isAdmin =
+          typeof session === "object" &&
+          session !== null &&
+          session.user.role === "admin" &&
+          !session.user.disabled;
+      }
+    } else if (sessionPath) {
+      // Setup incomplete (or origin missing): downstream resolvers must
+      // fail closed without a second settings read.
+      setRequestHints(c.req.raw, { canonicalOrigin, session: null });
+    }
+    c.set("actorIsAdmin", isAdmin);
+
+    await next();
+    if (timing !== undefined && isAdmin) {
+      const header = timing.render();
+      if (header !== "") c.header("Server-Timing", header);
     }
   });
 
@@ -185,7 +308,13 @@ export function createApp() {
   // canonical origin plus the request's own origin.
   app.use("/api/v1/*", async (c, next) => {
     if (!isMutationMethod(c.req.method)) return next();
-    const canonicalOrigin = await readCanonicalOrigin(c.env.DB);
+    const settings = c.get("appSettings");
+    const canonicalOrigin =
+      settings !== undefined
+        ? (!settings.error && setupStateFromRead(settings) === "complete"
+            ? (settings.row?.canonical_origin ?? null)
+            : null)
+        : await readCanonicalOrigin(c.env.DB);
     if (!isMutationOriginAllowed(c.req.raw, canonicalOrigin)) {
       return apiError(
         c,
@@ -201,8 +330,9 @@ export function createApp() {
   // stay closed, and a database error keeps the gate closed too.
   app.use("/api/*", async (c, next) => {
     if (!isProtectedApiPath(c.req.path)) return next();
-    const state = await readSetupState(c.env.DB);
-    if (state !== "complete") {
+    const settings =
+      c.get("appSettings") ?? (await readAppSettings(c.env.DB));
+    if (setupStateFromRead(settings) !== "complete") {
       return apiError(c, 503, "SETUP_REQUIRED", "Initial setup has not completed.");
     }
     return next();

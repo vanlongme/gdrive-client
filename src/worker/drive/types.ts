@@ -248,6 +248,8 @@ export interface DriveFileMeta {
   readonly sha256Checksum?: string;
   readonly resourceKey?: string;
   readonly hasThumbnail: boolean;
+  /** SA-observed thumbnail URL when the file has one (server-internal). */
+  readonly thumbnailLink?: string;
   /**
    * Present when mimeType is the shortcut MIME: the target's Drive file ID,
    * its MIME type and the resource key Google may require to address it
@@ -459,6 +461,13 @@ export interface OpenContentInput extends ProviderRequestContext {
 export interface OpenThumbnailInput extends ProviderRequestContext {
   readonly identity: ReadIdentity;
   readonly ref: DriveResourceRef;
+  /**
+   * The thumbnailLink already returned by the admission metadata (wave-9
+   * step 2c): a string skips the second files.get entirely; `null` means
+   * "known absent" and fails not-found without an upstream call; `undefined`
+   * preserves the legacy files.get fallback.
+   */
+  readonly thumbnailLink?: string | null;
 }
 
 /** Workspace export formats the read provider may request (spec §7.1). */

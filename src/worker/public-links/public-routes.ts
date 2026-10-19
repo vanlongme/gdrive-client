@@ -28,11 +28,16 @@ import {
 import { DriveError } from '../drive/errors';
 import {
   assertInMount,
+  createD1VerdictStore,
   isWithinFolder,
   mountScopeOf,
   oauthParentLookup,
   type MountScope,
+  type ParentMeta,
+  type ParentLookup,
+  type SharedVerdictStore,
 } from '../drive/containment';
+import { defer, requestTokenMemo, timedTokenSource, timingFor } from '../timing';
 import { createCoordinatorTokenSource } from '../drive/coordinator-client';
 import { createGoogleOAuthProvider } from '../drive/providers/google-oauth';
 import { createServiceAccountReadProvider } from '../drive/providers/service-account-read';
@@ -149,6 +154,7 @@ function countedDownloadBody(
   db: D1Database,
   linkId: string,
   body: ReadableStream<Uint8Array>,
+  runLater: (work: Promise<unknown>) => void,
 ): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   let counted = false;
@@ -162,7 +168,9 @@ function countedDownloadBody(
         }
         if (!counted) {
           counted = true;
-          await bumpPublicLinkCounter(db, linkId, 'download_count');
+          // Still "count only once bytes flow": the UPDATE is triggered by
+          // the first pulled chunk but deferred off the critical path.
+          runLater(bumpPublicLinkCounter(db, linkId, 'download_count'));
         }
         ctl.enqueue(value);
       } catch (err) {
@@ -225,15 +233,18 @@ async function assertLinkScope(
   resolved: ResolvedLink,
   meta: DriveFileMeta,
   lookup: ReturnType<typeof oauthParentLookup>,
+  shared?: SharedVerdictStore,
 ): Promise<void> {
-  await assertInMount(resolved.scope, meta, lookup); // resource inside the mount
+  await assertInMount(resolved.scope, meta, lookup, shared); // resource inside the mount
   const proof = await isWithinFolder(resolved.scope, resolved.link.folderId, meta, lookup);
   if (!proof.inside) {
     throw new ApiRequestError(404, 'FILE_NOT_ACCESSIBLE', 'The resource is not accessible.');
   }
-  // The link ROOT must stay inside its mount: walk the root itself.
-  const rootMeta = await lookup(resolved.link.folderId);
-  await assertInMount(resolved.scope, rootMeta, lookup);
+  // The link ROOT must stay inside its mount: reuse the already-fetched
+  // meta when the requested resource IS the root (the memoized lookup
+  // covers the rest of the duplicated-fetch cases).
+  const rootMeta = meta.id === resolved.link.folderId ? meta : await lookup(resolved.link.folderId);
+  await assertInMount(resolved.scope, rootMeta, lookup, shared);
 }
 
 /** Descendant proof that also yields breadcrumbs (root-first, root included). */
@@ -241,17 +252,18 @@ async function proveFolderForChildren(
   resolved: ResolvedLink,
   meta: DriveFileMeta,
   lookup: ReturnType<typeof oauthParentLookup>,
+  shared?: SharedVerdictStore,
 ): Promise<PublicBreadcrumb[]> {
   if (meta.mimeType !== FOLDER_MIME_TYPE) {
     throw new ApiRequestError(404, 'FILE_NOT_ACCESSIBLE', 'The resource is not accessible.');
   }
-  await assertInMount(resolved.scope, meta, lookup);
+  await assertInMount(resolved.scope, meta, lookup, shared);
   const proof = await isWithinFolder(resolved.scope, resolved.link.folderId, meta, lookup);
   if (!proof.inside) {
     throw new ApiRequestError(404, 'FILE_NOT_ACCESSIBLE', 'The resource is not accessible.');
   }
-  const rootMeta = await lookup(resolved.link.folderId);
-  await assertInMount(resolved.scope, rootMeta, lookup);
+  const rootMeta = meta.id === resolved.link.folderId ? meta : await lookup(resolved.link.folderId);
+  await assertInMount(resolved.scope, rootMeta, lookup, shared);
   return [
     { id: resolved.link.folderId, name: rootMeta.name ?? resolved.link.folderName },
     ...proof.path.slice().reverse().map((p) => ({ id: p.id, name: p.name })),
@@ -265,15 +277,37 @@ interface WriterCtx {
   readonly lookup: ReturnType<typeof oauthParentLookup>;
 }
 
+/**
+ * Per-request memo over ancestor lookups: the mount-containment walk, the
+ * descendant proof and the link-root re-check share one Google fetch per
+ * folder — the link-root lookup the coordinator flagged as duplicated is
+ * served from the same memo.
+ */
+function memoizedParentLookup(lookup: ParentLookup): ParentLookup {
+  const memo = new Map<string, Promise<ParentMeta>>();
+  return (folderId) => {
+    const existing = memo.get(folderId);
+    if (existing !== undefined) return existing;
+    const promise = lookup(folderId);
+    memo.set(folderId, promise);
+    return promise;
+  };
+}
+
 async function writerCtx(
   c: RC,
   deps: PublicLinkRouterDeps,
   mount: MountRecord,
 ): Promise<WriterCtx> {
   const writer = (await requireUsableOAuthWriter(c.env.DB, mount.catalogConnectionId, 'catalog')).writer;
+  const base = deps.tokenSource ?? createCoordinatorTokenSource(c.env);
+  const timed = timingFor(c.req.raw);
+  const tokenSource = requestTokenMemo(c.req.raw).wrap(
+    timed === undefined ? base : timedTokenSource(base, timed),
+  );
   const provider =
-    deps.oauthProvider ?? createGoogleOAuthProvider({ tokenSource: deps.tokenSource ?? createCoordinatorTokenSource(c.env) });
-  return { writer, provider, lookup: oauthParentLookup({ provider, writer, signal: c.req.raw.signal }) };
+    deps.oauthProvider ?? createGoogleOAuthProvider({ tokenSource });
+  return { writer, provider, lookup: memoizedParentLookup(oauthParentLookup({ provider, writer, signal: c.req.raw.signal })) };
 }
 
 async function fetchMeta(ctx: WriterCtx, id: string): Promise<DriveFileMeta> {
@@ -292,8 +326,15 @@ const FALLBACK_MTIME = '1970-01-01T00:00:00.000Z';
 export function createPublicLinkRouter(deps: PublicLinkRouterDeps = {}) {
   const app = new Hono<{ Bindings: Env; Variables: { requestId?: string } }>();
   const now = deps.now ?? Date.now;
-  const readProviderFor = (env: Env): ServiceAccountContentReadProvider =>
-    deps.readProvider ?? createServiceAccountReadProvider({ tokenSource: deps.tokenSource ?? createCoordinatorTokenSource(env) });
+  const readProviderFor = (env: Env, c: RC): ServiceAccountContentReadProvider => {
+    const base = deps.tokenSource ?? createCoordinatorTokenSource(env);
+    const timed = timingFor(c.req.raw);
+    return deps.readProvider ?? createServiceAccountReadProvider({
+      tokenSource: requestTokenMemo(c.req.raw).wrap(
+        timed === undefined ? base : timedTokenSource(base, timed),
+      ),
+    });
+  };
 
   // GET /:slug — public metadata; view_count++ on success.
   app.get('/:slug', async (c) => {
@@ -305,7 +346,8 @@ export function createPublicLinkRouter(deps: PublicLinkRouterDeps = {}) {
     if (c.req.method === 'HEAD') {
       return new Response(null, { status: 200, headers: { 'Content-Type': 'application/json; charset=UTF-8' } });
     }
-    await bumpPublicLinkCounter(c.env.DB, link.id, 'view_count');
+    // Counter write deferred off the response path (wave-9 step 1d).
+    defer(c, bumpPublicLinkCounter(c.env.DB, link.id, 'view_count'));
     return c.json(PublicFolderMetaSchema.parse({
       slug: link.slug,
       folderName: link.folderName,
@@ -374,7 +416,7 @@ export function createPublicLinkRouter(deps: PublicLinkRouterDeps = {}) {
       const ctx = await writerCtx(c, deps, resolved.mount);
       const folderId = validateDriveId(c.req.query('folderId') ?? resolved.link.folderId, 'public.children');
       const meta = await fetchMeta(ctx, folderId);
-      const breadcrumbs = await proveFolderForChildren(resolved, meta, ctx.lookup);
+      const breadcrumbs = await proveFolderForChildren(resolved, meta, ctx.lookup, createD1VerdictStore(c.env.DB));
       const pageToken = c.req.query('pageToken');
       const page: CatalogPage = await ctx.provider.listChildren({
         writer: ctx.writer,
@@ -417,8 +459,8 @@ export function createPublicLinkRouter(deps: PublicLinkRouterDeps = {}) {
       if (meta.mimeType === FOLDER_MIME_TYPE || meta.mimeType === SHORTCUT_MIME_TYPE) {
         throw new ApiRequestError(404, 'FILE_NOT_ACCESSIBLE', 'The resource is not accessible.');
       }
-      await assertLinkScope(resolved, meta, ctx.lookup);
-      const provider = readProviderFor(c.env);
+      await assertLinkScope(resolved, meta, ctx.lookup, createD1VerdictStore(c.env.DB));
+      const provider = readProviderFor(c.env, c);
       const verified = await verifiedFileForRead(provider, c.env, resolved.mount, fileId, c.req.raw.signal, deps.oauthProvider);
 
       const isHead = c.req.method === 'HEAD';
@@ -462,7 +504,7 @@ export function createPublicLinkRouter(deps: PublicLinkRouterDeps = {}) {
       if (length !== undefined) headers.set('Content-Length', length.toString(10));
       headers.set('Content-Disposition', buildContentDisposition(resolveDisposition(upstream.contentType ?? deliveredType, download ? 'attachment' : 'inline'), verified.meta.name));
       const relay = downstreamAbortableBody(upstream.body, () => controller.abort());
-      const body = download ? countedDownloadBody(c.env.DB, resolved.link.id, relay) : relay;
+      const body = download ? countedDownloadBody(c.env.DB, resolved.link.id, relay, (work) => defer(c, work)) : relay;
       return new Response(body, { status: upstream.status, headers });
     } catch (err) {
       // Same anonymous collapse as errRes elsewhere (review R6): a disabled
@@ -488,7 +530,7 @@ export function createPublicLinkRouter(deps: PublicLinkRouterDeps = {}) {
       if (rootMeta.mimeType !== FOLDER_MIME_TYPE) {
         throw new ApiRequestError(404, 'FILE_NOT_ACCESSIBLE', 'The resource is not accessible.');
       }
-      await assertLinkScope(resolved, rootMeta, ctx.lookup);
+      await assertLinkScope(resolved, rootMeta, ctx.lookup, createD1VerdictStore(c.env.DB));
       // Caps (review M1): files/bytes bound the payload; dirs, listed
       // entries and list pages bound the OAuth subrequest budget so the
       // pre-walk itself stays under the Workers per-invocation limit.
@@ -560,7 +602,7 @@ export function createPublicLinkRouter(deps: PublicLinkRouterDeps = {}) {
         } while (pageToken !== undefined);
       }
 
-      const provider = readProviderFor(c.env);
+      const provider = readProviderFor(c.env, c);
       const specs: ZipEntrySpec[] = [];
       for (const d of dirs) specs.push({ name: d.path, modifiedTime: d.modifiedTime });
       for (const item of items) {
@@ -590,7 +632,7 @@ export function createPublicLinkRouter(deps: PublicLinkRouterDeps = {}) {
         'Content-Disposition': buildContentDisposition('attachment', `${rootMeta.name}.zip`),
       });
       return new Response(
-        countedDownloadBody(c.env.DB, resolved.link.id, createZipStream(specs)),
+        countedDownloadBody(c.env.DB, resolved.link.id, createZipStream(specs), (work) => defer(c, work)),
         { status: 200, headers },
       );
     } catch (err) {

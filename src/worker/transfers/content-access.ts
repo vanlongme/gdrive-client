@@ -23,8 +23,10 @@ import type { AuthUser } from '../auth/session';
 import { createCoordinatorTokenSource } from '../drive/coordinator-client';
 import {
   assertInMount,
+  createD1VerdictStore,
   mountScopeOf,
   oauthParentLookup,
+  type SharedVerdictStore,
 } from '../drive/containment';
 import { DriveError, type DriveFailureReason } from '../drive/errors';
 import {
@@ -35,6 +37,7 @@ import {
   requireUsableOAuthWriter,
   resolveActor,
   type MountRecord,
+  type ResolvedWriterState,
 } from '../drive/mounts';
 import { SHORTCUT_MIME_TYPE } from '../drive/providers/common';
 import { createGoogleOAuthProvider } from '../drive/providers/google-oauth';
@@ -64,6 +67,14 @@ import {
   type MediaTicketPayload,
   type TicketPrincipal,
 } from '../security/tickets';
+import {
+  requestTokenMemo,
+  timedParentLookup,
+  timedSaProvider,
+  timedTokenSource,
+  timingFor,
+  type RequestTiming,
+} from '../timing';
 
 export type { MountRecord } from '../drive/mounts';
 export { ApiRequestError } from '../drive/mounts';
@@ -102,16 +113,41 @@ export type RouterContext = Context<{
   Variables: { requestId?: string };
 }>;
 
+/**
+ * The cross-isolate containment verdict store for this request's D1
+ * (migration 0009). Verdict TTL is 60 s; app-initiated tree mutations
+ * invalidate affected keys (wave-9 step 2b).
+ */
+export function sharedVerdictStoreFor(c: RouterContext): SharedVerdictStore {
+  return createD1VerdictStore(c.env.DB);
+}
+
 export function providerFor(
   c: RouterContext,
   deps: ContentRouteDeps,
 ): ServiceAccountContentReadProvider {
-  return (
+  const provider =
     deps.readProvider ??
     createServiceAccountReadProvider({
-      tokenSource: deps.tokenSource ?? createCoordinatorTokenSource(c.env),
-    })
-  );
+      tokenSource: deps.tokenSource ?? tokenSourceFor(c, c.env),
+    });
+  const timing = timingFor(c.req.raw);
+  return timing === undefined ? provider : timedSaProvider(provider, timing);
+}
+
+/**
+ * The per-request token source: the DO /admit for one identity+file is
+ * shared by the SA metadata call and the media call (and by every OAuth
+ * ancestor hop of a containment walk). The memo lives only for the request.
+ */
+export function tokenSourceFor(
+  c: RouterContext,
+  env: Env,
+): CoordinatorTokenSource {
+  const memo = requestTokenMemo(c.req.raw);
+  const timing = timingFor(c.req.raw);
+  const base = createCoordinatorTokenSource(env);
+  return memo.wrap(timing === undefined ? base : timedTokenSource(base, timing));
 }
 
 // ---------------------------------------------------------------------------
@@ -323,7 +359,7 @@ async function sessionAdmits(
   mount: MountRecord,
 ): Promise<Admission> {
   if (actor.kind === 'user') {
-    const access = await authorizeMount(env.DB, actor, mount.id);
+    const access = await authorizeMount(env.DB, actor, mount.id, mount);
     if (access === null || !access.operations.has('read')) {
       return { ok: false, reason: 'no-read-access' };
     }
@@ -484,7 +520,7 @@ export async function listReadIdentities(
  * caller's own abort is terminal, and local input/destination refusals are
  * programming errors (spec §5.4).
  */
-const NON_FAILOVER_REASONS = new Set<DriveFailureReason>([
+export const NON_FAILOVER_REASONS = new Set<DriveFailureReason>([
   'download-restricted',
   'rate-limited',
   'quota-exceeded',
@@ -613,12 +649,16 @@ async function proveMyDriveContainment(
   meta: DriveFileMeta,
   signal: AbortSignal | undefined,
   oauthProvider: OAuthCatalogWriteProvider | undefined,
+  opts: VerifiedFileReadOpts = {},
+  writerStateP?: Promise<ResolvedWriterState>,
 ): Promise<void> {
   let writer: ResolvedWriter;
   try {
-    writer = (
-      await requireUsableOAuthWriter(env.DB, mount.catalogConnectionId, 'catalog')
-    ).writer;
+    const state = await (
+      writerStateP ??
+      requireUsableOAuthWriter(env.DB, mount.catalogConnectionId, 'catalog')
+    );
+    writer = state.writer;
   } catch (err) {
     if (err instanceof ApiRequestError) {
       // A disabled/needs-reauth catalog connection cannot prove anything:
@@ -633,17 +673,17 @@ async function proveMyDriveContainment(
   }
   const provider =
     oauthProvider ??
-    createGoogleOAuthProvider({ tokenSource: createCoordinatorTokenSource(env) });
+    createGoogleOAuthProvider({
+      tokenSource: opts.tokenSource ?? createCoordinatorTokenSource(env),
+    });
+  let lookup = oauthParentLookup({
+    provider,
+    writer,
+    ...(signal === undefined ? {} : { signal }),
+  });
+  if (opts.timing !== undefined) lookup = timedParentLookup(lookup, opts.timing);
   try {
-    await assertInMount(
-      mountScopeOf(mount),
-      meta,
-      oauthParentLookup({
-        provider,
-        writer,
-        ...(signal === undefined ? {} : { signal }),
-      }),
-    );
+    await assertInMount(mountScopeOf(mount), meta, lookup, opts.shared);
   } catch (err) {
     if (err instanceof ResourceScopeError) {
       throw new ApiRequestError(404, 'FILE_NOT_ACCESSIBLE', OUTSIDE_MOUNT_MESSAGE);
@@ -663,6 +703,26 @@ async function proveMyDriveContainment(
   }
 }
 
+export interface VerifiedFileReadOpts {
+  /** Per-request memoized source for the OAuth provider's admissions. */
+  readonly tokenSource?: CoordinatorTokenSource;
+  readonly timing?: RequestTiming;
+  /** Cross-isolate containment verdict store (migration 0009). */
+  readonly shared?: SharedVerdictStore;
+  /** Pre-resolved read pool (skips a duplicate listReadIdentities read). */
+  readonly identities?: readonly ReadIdentity[];
+  /**
+   * Fired exactly once after the winning SA metadata read passes
+   * checkFileMeta, BEFORE the My Drive containment walk — the caller may
+   * overlap a media open with the walk while no byte is served yet
+   * (coordinator M4 ruling: media opens only after metadata checks pass).
+   */
+  readonly onMetaVerified?: (verified: {
+    readonly meta: DriveFileMeta;
+    readonly identity: ReadIdentity;
+  }) => void;
+}
+
 export async function verifiedFileForRead(
   provider: ServiceAccountContentReadProvider,
   env: Env,
@@ -670,8 +730,17 @@ export async function verifiedFileForRead(
   fileId: string,
   signal?: AbortSignal,
   oauthProvider?: OAuthCatalogWriteProvider,
+  opts: VerifiedFileReadOpts = {},
 ): Promise<VerifiedFileRead> {
-  const identities = await listReadIdentities(env.DB, mount.id);
+  // My Drive mounts need the OAuth catalog writer for the ancestor walk:
+  // start its D1 read now so it overlaps the SA metadata call.
+  const writerStateP =
+    mount.driveId === null
+      ? requireUsableOAuthWriter(env.DB, mount.catalogConnectionId, 'catalog')
+      : undefined;
+  writerStateP?.catch(() => undefined);
+  const identities =
+    opts.identities ?? (await listReadIdentities(env.DB, mount.id));
   if (identities.length === 0) {
     throw new DriveError(
       'upstream-unavailable',
@@ -694,10 +763,21 @@ export async function verifiedFileForRead(
       return { identity, meta };
     },
   );
+  // checkFileMeta has passed for this exact identity: the earliest point a
+  // media open may start (coordinator M4). Runs before the containment walk.
+  opts.onMetaVerified?.({ meta, identity });
   // Proven once per admission, outside the SA failover loop: containment is a
   // property of the file id, not of which pool identity happened to read it.
   if (mount.driveId === null) {
-    await proveMyDriveContainment(env, mount, meta, signal, oauthProvider);
+    await proveMyDriveContainment(
+      env,
+      mount,
+      meta,
+      signal,
+      oauthProvider,
+      opts,
+      writerStateP,
+    );
   }
   return {
     meta,
@@ -796,24 +876,43 @@ export interface AdmittedRead {
   readonly principal: TicketPrincipal;
 }
 
-export async function admitFileRead(
+export interface AdmittedRequest {
+  readonly mount: MountRecord;
+  readonly principal: TicketPrincipal;
+  /** Enabled pool candidates in selection order (resolved during admission). */
+  readonly identities: readonly ReadIdentity[];
+}
+
+/**
+ * Mount + actor + scope admission and the read-pool listing — everything
+ * before the SA Drive calls. The mount read, actor resolution and pool
+ * listing are independent and run concurrently; attach-only catches keep a
+ * loser rejection from becoming an unhandled rejection.
+ */
+export async function admitFileRequest(
   c: RouterContext,
   deps: ContentRouteDeps,
   options: { readonly revisionId?: string } = {},
-): Promise<AdmittedRead> {
+): Promise<AdmittedRequest> {
   const mountId = requireParam(c, 'mountId');
   const fileId = requireDriveId(requireParam(c, 'fileId'), 'fileId');
   const now = (deps.now ?? Date.now)();
-  const mount = await (deps.getMount ?? getMount)(c.env.DB, mountId);
-  if (mount === null) {
-    throw new ApiRequestError(404, 'NOT_FOUND', 'Mount not found.');
-  }
-  const resolved = await resolveRequestActor(deps, {
+  const mountP = (deps.getMount ?? getMount)(c.env.DB, mountId);
+  mountP.catch(() => undefined);
+  const resolvedP = resolveRequestActor(deps, {
     request: c.req.raw,
     env: c.env,
     resource: { kind: 'file', mountId, fileId },
     now,
   });
+  resolvedP.catch(() => undefined);
+  const identitiesP = listReadIdentities(c.env.DB, mountId);
+  identitiesP.catch(() => undefined);
+  const mount = await mountP;
+  if (mount === null) {
+    throw new ApiRequestError(404, 'NOT_FOUND', 'Mount not found.');
+  }
+  const resolved = await resolvedP;
   const admission = await admitFileAccess(
     c.env,
     resolved,
@@ -833,15 +932,32 @@ export async function admitFileRead(
       admission.reason === 'auth-required' ? 'AUTH_REQUIRED' : 'FORBIDDEN';
     throw new ApiRequestError(status, code, 'Access to this content is denied.');
   }
+  const identities = await identitiesP;
+  return { mount, principal: admission.principal, identities };
+}
+
+export async function admitFileRead(
+  c: RouterContext,
+  deps: ContentRouteDeps,
+  options: { readonly revisionId?: string } = {},
+): Promise<AdmittedRead> {
+  const fileId = requireDriveId(requireParam(c, 'fileId'), 'fileId');
+  const admitted = await admitFileRequest(c, deps, options);
   const verified = await verifiedFileForRead(
     providerFor(c, deps),
     c.env,
-    mount,
+    admitted.mount,
     fileId,
     c.req.raw.signal,
     deps.oauthProvider,
+    {
+      tokenSource: tokenSourceFor(c, c.env),
+      timing: timingFor(c.req.raw),
+      shared: sharedVerdictStoreFor(c),
+      identities: admitted.identities,
+    },
   );
-  return { mount, verified, principal: admission.principal };
+  return { mount: admitted.mount, verified, principal: admitted.principal };
 }
 
 // ---------------------------------------------------------------------------

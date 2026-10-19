@@ -52,6 +52,7 @@ export async function handleThumbnail(
         provider.openThumbnail({
           identity,
           ref,
+          thumbnailLink: admitted.verified.meta.thumbnailLink ?? null,
           signal: controller.signal,
         }),
     );
@@ -71,9 +72,9 @@ export async function handleThumbnail(
     if (upstream.contentLength !== undefined) {
       headers.set('Content-Length', upstream.contentLength.toString(10));
     }
-    // Cache-Control stays at the global middleware's no-store (reviewer F11):
-    // spec §9.4 permits a short private cache, but no-store is the stronger
-    // and accepted deviation — no local override here.
+    // Wave-9 step 2c: a short private cache — thumbnails are the hot repeat
+    // fetch on the explorer grid and spec §9.4 permits it.
+    headers.set('Cache-Control', 'private, max-age=300');
 
     const body = downstreamAbortableBody(upstream.body, () =>
       controller.abort(),

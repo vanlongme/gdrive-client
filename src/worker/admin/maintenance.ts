@@ -46,6 +46,7 @@ import {
   getAuthInstance,
 } from '../auth/session';
 import type { AdminIdentity, RequireAdminFn } from './routes';
+import { purgeCoordinatorMaintenance } from '../drive/coordinator-client';
 import {
   abortRotation,
   completeRotation,
@@ -438,6 +439,17 @@ export function createMaintenanceRouter(deps: MaintenanceRouterDeps = {}) {
   const app = new Hono<{ Bindings: Env; Variables: { requestId?: string } }>();
   const requireAdmin = deps.requireAdmin ?? realRequireAdmin;
   const now = deps.now ?? Date.now;
+
+  // Wave-9 step 1c: coordinator DOs cache the maintenance flag for ≤2 s.
+  // After any successful mutation through this router, broadcast a purge so
+  // the new mode is visible to the very next admission rather than only at
+  // TTL expiry.
+  app.use('*', async (c, next) => {
+    await next();
+    if (c.req.method !== 'GET' && c.req.method !== 'HEAD' && c.res.status < 400) {
+      await purgeCoordinatorMaintenance(c.env).catch(() => undefined);
+    }
+  });
 
   const rotationEnv = (env: Env): RotationEnv => ({
     DB: env.DB,

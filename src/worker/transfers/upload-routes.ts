@@ -534,8 +534,10 @@ async function runRemoteInit(
         generatedId: directive.generatedFileId,
         ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
       });
-      // The generated id may carry a cached "outside" verdict from an
-      // earlier 404 lookup; the new folder must be re-walked.
+      // The generated id may carry a cached "outside" verdict in this
+      // isolate from an earlier 404 lookup; the new folder must be
+      // re-walked. The shared store needs no delete: it holds positive
+      // verdicts only, and a fresh generated id can have none (review L5).
       invalidateFolder(ctx.pinned.mountScope, file.id);
       return {
         type: 'remote-init-result',

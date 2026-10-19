@@ -22,6 +22,7 @@ import type { ApiErrorCode, AppRole } from '../../shared/contracts/index';
 import { getBootstrapConfig } from '../security/bootstrap-config';
 import { getAuth, readCanonicalOrigin } from './better-auth';
 import type { AppAuth } from './better-auth';
+import { getRequestHints } from '../timing';
 
 export interface AuthUser {
   id: string;
@@ -78,7 +79,7 @@ export async function getAuthSession(
   request: Request,
   env: AuthFactoryEnvWithSecrets,
 ): Promise<AuthSession | null> {
-  const auth = await getAuth(env);
+  const auth = await getAuth(env, getRequestHints(request)?.canonicalOrigin);
   const result = await auth.api.getSession({ headers: request.headers });
   if (result === null || result === undefined) return null;
   const { user, session } = result;
@@ -116,8 +117,12 @@ export async function requireUser(
     );
   }
   // A readable canonical origin proves setup completed and settings are
-  // intact; auth must fail closed otherwise.
-  if ((await readCanonicalOrigin(env.DB)) === null) {
+  // intact; auth must fail closed otherwise. The app middleware may have
+  // resolved both once already for this request (wave-9 request hints).
+  const hints = getRequestHints(request);
+  const canonicalOrigin =
+    hints === undefined ? await readCanonicalOrigin(env.DB) : hints.canonicalOrigin;
+  if (canonicalOrigin === null) {
     throw new AuthError(
       503,
       'SETUP_REQUIRED',
@@ -125,14 +130,25 @@ export async function requireUser(
     );
   }
   let auth: AuthSession | null;
-  try {
-    auth = await getAuthSession(request, env);
-  } catch {
-    throw new AuthError(
-      503,
-      'AUTH_UNAVAILABLE',
-      'Authentication is unavailable.',
-    );
+  if (hints !== undefined) {
+    if (hints.session === 'error') {
+      throw new AuthError(
+        503,
+        'AUTH_UNAVAILABLE',
+        'Authentication is unavailable.',
+      );
+    }
+    auth = hints.session;
+  } else {
+    try {
+      auth = await getAuthSession(request, env);
+    } catch {
+      throw new AuthError(
+        503,
+        'AUTH_UNAVAILABLE',
+        'Authentication is unavailable.',
+      );
+    }
   }
   if (auth === null) {
     throw new AuthError(401, 'AUTH_REQUIRED', 'A valid session is required.');

@@ -149,6 +149,7 @@ async function resetState() {
     'mount_grants',
     'mount_read_credentials',
     'file_readiness',
+    'containment_verdicts',
     'mounts',
     'audit_events',
     'google_connections',

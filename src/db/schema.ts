@@ -724,6 +724,25 @@ export const publicLinkUnlockAttempts = sqliteTable(
   (t) => [index('public_link_unlock_attempts_updated_idx').on(t.updatedAt)],
 );
 
+// ---------------------------------------------------------------------------
+// Wave 9 (migration 0009): cross-isolate positive containment verdicts. A row
+// means `folder_id` was proven on a path to `root_folder_id` inside
+// `mount_id`; expires_at bounds the shared trust (positive verdicts only).
+// ---------------------------------------------------------------------------
+export const containmentVerdicts = sqliteTable(
+  'containment_verdicts',
+  {
+    mountId: text('mount_id').notNull(),
+    rootFolderId: text('root_folder_id').notNull(),
+    folderId: text('folder_id').notNull(),
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.mountId, t.rootFolderId, t.folderId] }),
+    index('idx_containment_verdicts_expires').on(t.expiresAt),
+  ],
+);
+
 // One-use owner recovery tokens; only the SHA-256 hash is stored.
 export const adminRecoveryTokens = sqliteTable(
   'admin_recovery_tokens',

@@ -1,5 +1,9 @@
 import { env } from 'cloudflare:workers';
-import { applyD1Migrations, type D1Migration } from 'cloudflare:test';
+import {
+  applyD1Migrations,
+  runInDurableObject,
+  type D1Migration,
+} from 'cloudflare:test';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   createVault,
@@ -286,6 +290,69 @@ describe('origin assertion', () => {
 // ---------------------------------------------------------------------------
 // Service account admission.
 // ---------------------------------------------------------------------------
+
+describe('maintenance gate caching (wave-9 L2)', () => {
+  it('fails closed on a D1 error but never caches the fail-closed verdict', async () => {
+    const projectId = 'proj-maint-cache';
+    const stub = coordinatorStub(projectId);
+    const identity: ServiceAccountTokenIdentity = {
+      provider: 'service_account',
+      credentialId: 'sa-none',
+      credentialVersion: 1,
+      projectId,
+      principalId: 'sa-none@x.iam.gserviceaccount.com',
+      scopes: [SA_READ_SCOPE],
+    };
+    let realDB: D1Database | undefined;
+    // Break only maintenance_state reads inside the live DO instance.
+    await runInDurableObject(stub, async (instance) => {
+      const holder = instance as unknown as { env: Env };
+      realDB = holder.env.DB;
+      const inner = realDB!;
+      holder.env = {
+        ...holder.env,
+        DB: {
+          prepare(sql: string) {
+            if (sql.includes('maintenance_state')) {
+              const stmt = {
+                bind: () => stmt,
+                first: () => Promise.reject(new Error('D1 read failed')),
+                all: () => Promise.reject(new Error('D1 read failed')),
+                run: () => Promise.reject(new Error('D1 read failed')),
+                raw: () => Promise.reject(new Error('D1 read failed')),
+              };
+              return stmt as unknown as D1PreparedStatement;
+            }
+            return inner.prepare(sql);
+          },
+          batch: (s: D1PreparedStatement[]) => inner.batch(s),
+          exec: (q: string) => inner.exec(q),
+          dump: () => inner.dump(),
+          withSession: (() => inner.withSession()) as D1Database['withSession'],
+        } as D1Database,
+      };
+    });
+    const during = (await admit(identity)) as {
+      ok: boolean;
+      code?: string;
+      detail?: string;
+    };
+    expect(during.ok).toBe(false);
+    expect(during.code).toBe('UPSTREAM_UNAVAILABLE');
+    expect(during.detail).toBe('maintenance_mode');
+
+    // Restore D1: the very next admission must RE-READ maintenance_state —
+    // the error verdict may not be cached under the 2 s TTL (L2).
+    await runInDurableObject(stub, async (instance) => {
+      const holder = instance as unknown as { env: Env };
+      holder.env = { ...holder.env, DB: realDB! };
+    });
+    const after = (await admit(identity)) as { ok: boolean; code?: string };
+    expect(after.ok).toBe(false);
+    // Past the maintenance gate now: identity verification answers instead.
+    expect(after.code).toBe('CREDENTIAL_DISABLED');
+  });
+});
 
 describe('service account admission', () => {
   it('issues a token via a verifiably-signed readonly JWT, then serves from RAM cache', async () => {

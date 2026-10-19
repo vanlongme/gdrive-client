@@ -99,7 +99,7 @@ export async function callDriveApi<T>(
   identity: TokenIdentity,
   operation: string,
   run: (bearer: string) => Promise<T>,
-  options: { hasStreamBody?: boolean; fileId?: string } = {},
+  options: { hasStreamBody?: boolean; fileId?: string; signal?: AbortSignal } = {},
 ): Promise<T> {
   const admission =
     options.fileId === undefined ? undefined : { fileId: options.fileId };
@@ -114,7 +114,9 @@ export async function callDriveApi<T>(
     } catch (err) {
       if (!(err instanceof DriveError)) throw err;
       const failureKind = failureKindForDriveError(err);
-      if (failureKind !== undefined) {
+      // A call that was already aborted never reports: a denied request's
+      // speculated media open must not push the SA into cooldown (M4).
+      if (failureKind !== undefined && options.signal?.aborted !== true) {
         try {
           await tokenSource.reportFailure(identity, {
             kind: failureKind,
@@ -277,6 +279,7 @@ export function parseFileMeta(json: unknown, operation: string): DriveFileMeta {
     sha256Checksum: optionalString(record, 'sha256Checksum'),
     resourceKey: optionalString(record, 'resourceKey'),
     hasThumbnail: optionalString(record, 'thumbnailLink') !== undefined,
+    thumbnailLink: optionalString(record, 'thumbnailLink'),
     shortcutTargetId:
       shortcut === undefined ? undefined : optionalString(shortcut, 'targetId'),
     shortcutTargetMimeType:

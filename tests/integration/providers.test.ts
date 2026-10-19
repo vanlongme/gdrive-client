@@ -229,6 +229,36 @@ describe('operation allowlist', () => {
     ).rejects.toMatchObject({ reason: 'operation-not-allowed' });
   });
 
+  it('suppresses the cooldown report when the media call was already aborted (wave-9 M4)', async () => {
+    const source = new FakeTokenSource();
+    const provider = createServiceAccountReadProvider({
+      tokenSource: source,
+      transport: {
+        async send() {
+          throw new DriveError('rate-limited', 'media 429', { status: 429 });
+        },
+      },
+    });
+    const ctl = new AbortController();
+    ctl.abort();
+    await expect(
+      provider.openContent({
+        identity: READER,
+        ref: { id: 'file-1' },
+        signal: ctl.signal,
+      }),
+    ).rejects.toMatchObject({ reason: 'rate-limited' });
+    // An aborted open (e.g. the early media fetch on a denied request) must
+    // never push the SA into cooldown.
+    expect(source.failures).toHaveLength(0);
+
+    // The same failure on a live call still reports normally.
+    await expect(
+      provider.openContent({ identity: READER, ref: { id: 'file-1' } }),
+    ).rejects.toMatchObject({ reason: 'rate-limited' });
+    expect(source.failures).toHaveLength(1);
+  });
+
   it('blocks SA-named operations on the OAuth transport', async () => {
     const transport = createDriveTransport('google_oauth');
     await expect(

@@ -332,6 +332,7 @@ async function resetState() {
     'mount_grants',
     'mount_read_credentials',
     'file_readiness',
+    'containment_verdicts',
     'mounts',
     'upload_batches',
     'upload_batch_nodes',

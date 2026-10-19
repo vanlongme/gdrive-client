@@ -134,15 +134,26 @@ function errorResponse(status: number, code: string, message: string): Response 
   return Response.json({ error: { code, message } }, { status });
 }
 
+/** Wave-9: bounded reuse of the maintenance flag inside the DO. */
+const MAINTENANCE_CACHE_TTL_MS = 2_000;
+
 export class ProjectCoordinator extends DurableObject<Env> {
   private readonly tokenCache = new TokenCache();
   private readonly singleFlight = new SingleFlight();
   private storageInitialized = false;
+  private maintenanceCache: { active: boolean; expiresAt: number } | undefined;
 
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.origin !== DO_ORIGIN) {
       return errorResponse(400, 'INVALID_COMMAND', 'unexpected origin');
+    }
+    // Wave-9: admin maintenance writes broadcast a purge so the cached flag
+    // never outlives a mode transition (the 2 s TTL is the bound when a
+    // write path forgets to purge).
+    if (request.method === 'POST' && url.pathname === '/purge') {
+      this.maintenanceCache = undefined;
+      return new Response(null, { status: 204 });
     }
     if (request.method === 'POST' && url.pathname === '/admit') {
       const body = await this.readJson(request);
@@ -302,10 +313,21 @@ export class ProjectCoordinator extends DurableObject<Env> {
     //    check runs before identity verification and the RAM cache; a D1
     //    read error fails closed rather than racing a rotation.
     let maintenance: boolean;
-    try {
-      maintenance = await isMaintenanceActive(this.env.DB);
-    } catch {
-      maintenance = true;
+    const maintenanceCached = this.maintenanceCache;
+    if (maintenanceCached !== undefined && maintenanceCached.expiresAt > nowMs) {
+      maintenance = maintenanceCached.active;
+    } else {
+      try {
+        maintenance = await isMaintenanceActive(this.env.DB);
+        // Errors fail closed but are never cached: the next admission must
+        // retry the read rather than ride a stale 'off' for the TTL.
+        this.maintenanceCache = {
+          active: maintenance,
+          expiresAt: nowMs + MAINTENANCE_CACHE_TTL_MS,
+        };
+      } catch {
+        maintenance = true;
+      }
     }
     if (maintenance) {
       return tokenFail('UPSTREAM_UNAVAILABLE', {
@@ -316,6 +338,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
 
     // 1. Re-read the authoritative identity row and verify every supplied
     //    field. A stale pin never gets a token under the new row's authority.
+    //    The identity check is intentionally NOT cached (wave-9 finding):
+    //    revocation must be visible to the very next admission, and a
+    //    TTL'd copy could outlive a just-disabled credential.
     const check = await this.verifyIdentity(identity);
     if (!check.ok) return check.result;
 

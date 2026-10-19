@@ -46,7 +46,7 @@ import { createGoogleOAuthProvider } from './providers/google-oauth';
 import { CursorError, openCursor, signCursor, type CursorSubject } from './cursors';
 import { validateDriveId } from './transport';
 import { resolveResource, ResourceScopeError } from './shortcuts';
-import { mountKindOf, mountScopeOf } from './containment';
+import { createD1VerdictStore, mountKindOf, mountScopeOf } from './containment';
 import { searchMyDriveMount } from './my-drive-search';
 import type {
   CatalogEntry,
@@ -54,6 +54,7 @@ import type {
   OAuthCatalogWriteProvider,
 } from './types';
 import { recordCatalogQuery } from '../admin/metrics';
+import { requestTokenMemo, timedTokenSource, timingFor } from '../timing';
 import {
   ApiRequestError,
   actorKey,
@@ -346,11 +347,20 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
   const cache = deps.cache ?? defaultCatalogCache;
   const now = deps.now ?? Date.now;
 
-  const oauthProviderFor = (env: Env): OAuthCatalogWriteProvider =>
-    deps.oauthProvider ??
-    createGoogleOAuthProvider({
-      tokenSource: createCoordinatorTokenSource(env),
-    });
+  const oauthProviderFor = (env: Env, c?: Context): OAuthCatalogWriteProvider => {
+    if (deps.oauthProvider !== undefined) return deps.oauthProvider;
+    // Wave-9: per-request token memo + timing (admits shared across all
+    // catalog calls of one request; never across requests).
+    const base = createCoordinatorTokenSource(env);
+    const timed = c === undefined ? undefined : timingFor(c.req.raw);
+    const tokenSource =
+      c === undefined
+        ? base
+        : requestTokenMemo(c.req.raw).wrap(
+            timed === undefined ? base : timedTokenSource(base, timed),
+          );
+    return createGoogleOAuthProvider({ tokenSource });
+  };
 
   // -------------------------------------------------------------------------
   // GET / — every mount the actor can see, with the operations they hold.
@@ -409,7 +419,7 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
         'catalog',
       );
       const writer = writerState.writer;
-      const provider = oauthProviderFor(c.env);
+      const provider = oauthProviderFor(c.env, c);
 
       // Prove folder scope, following shortcuts inside the mount. The mount
       // root (folderId === rootFolderId) is implicitly in-mount on both
@@ -417,7 +427,7 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
       let resolvedFolderId = folder;
       if (folder !== mountScope.rootFolderId) {
         const resolved = await resolveResource(
-          { access, mount, writer, provider },
+          { access, mount, writer, provider, shared: createD1VerdictStore(c.env.DB) },
           { id: folder },
         );
         if (resolved.meta.mimeType !== FOLDER_MIME_TYPE) {
@@ -581,7 +591,7 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
         'catalog',
       );
       const writer = writerState.writer;
-      const provider = oauthProviderFor(c.env);
+      const provider = oauthProviderFor(c.env, c);
 
       let scopedFolderId: string | undefined;
       if (scope === 'folder') {
@@ -593,7 +603,7 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
           scopedFolderId = folder;
         } else {
           const resolved = await resolveResource(
-            { access, mount, writer, provider },
+            { access, mount, writer, provider, shared: createD1VerdictStore(c.env.DB) },
             { id: folder },
           );
           if (resolved.meta.mimeType !== FOLDER_MIME_TYPE) {
@@ -734,13 +744,14 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
         mount.catalogConnectionId,
         'catalog',
       );
-      const provider = oauthProviderFor(c.env);
+      const provider = oauthProviderFor(c.env, c);
       const resolved = await resolveResource(
         {
           access,
           mount,
           writer: writerState.writer,
           provider,
+          shared: createD1VerdictStore(c.env.DB),
         },
         { id: file },
       );
