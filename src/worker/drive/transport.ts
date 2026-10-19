@@ -48,6 +48,20 @@ type DriveDestination =
   /** Absolute thumbnail URL under *.googleusercontent.com (https only). */
   | 'googleusercontent';
 
+/**
+ * Shape a JSON request body must have for an operation whose body carries
+ * authority (a permission grant). The caller can choose only the e-mail
+ * address; every other field is a fixed literal and no extra key is allowed.
+ */
+interface PinnedJsonBody {
+  /** Exact key set of the JSON object (order-insensitive, no extras). */
+  readonly keys: readonly string[];
+  /** Keys whose value must equal this literal string. */
+  readonly literals: Readonly<Record<string, string>>;
+  /** Key holding an e-mail address: syntax-checked, otherwise caller-chosen. */
+  readonly emailKey: string;
+}
+
 interface DriveOperationSpec {
   readonly provider: DriveProviderKind;
   readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -66,6 +80,8 @@ interface DriveOperationSpec {
   readonly requiredQueryKeys?: readonly string[];
   /** Key=value pairs that must match exactly on the final URL. */
   readonly requiredQuery?: Record<string, string>;
+  /** When set, the request must carry a JSON body of exactly this shape. */
+  readonly pinnedBody?: PinnedJsonBody;
   /**
    * Request body is buffered/replayable, so the operation participates in
    * bounded retry. Streaming bodies are never retried.
@@ -185,6 +201,54 @@ const DRIVE_OPERATIONS = {
     queryKeys: ['supportsAllDrives', 'fields', 'addParents', 'removeParents'],
     replayable: true,
     passStatuses: [200],
+  },
+  // My Drive read-pool grants (wave 7): the app shares the mount root folder
+  // with pool SAs. Always the mount's WRITE connection; the query pins
+  // `supportsAllDrives=true` and (for create) `sendNotificationEmail=false`,
+  // and the body is pinned to {type:'user', role:'reader', emailAddress}.
+  'oauth.permissions.list': {
+    provider: 'google_oauth',
+    method: 'GET',
+    destination: 'drive-api',
+    pathPattern: /^\/drive\/v3\/files\/[^/]+\/permissions$/,
+    queryKeys: ['supportsAllDrives', 'fields', 'pageSize', 'pageToken'],
+    requiredQuery: {
+      supportsAllDrives: 'true',
+      fields: 'permissions(id,type,role,emailAddress),nextPageToken',
+    },
+    replayable: true,
+    passStatuses: [200],
+  },
+  'oauth.permissions.create': {
+    provider: 'google_oauth',
+    method: 'POST',
+    destination: 'drive-api',
+    pathPattern: /^\/drive\/v3\/files\/[^/]+\/permissions$/,
+    queryKeys: ['sendNotificationEmail', 'supportsAllDrives', 'fields'],
+    requiredQuery: {
+      sendNotificationEmail: 'false',
+      supportsAllDrives: 'true',
+      fields: 'id',
+    },
+    pinnedBody: {
+      keys: ['type', 'role', 'emailAddress'],
+      literals: { type: 'user', role: 'reader' },
+      emailKey: 'emailAddress',
+    },
+    // Not replayed by the transport: the sync loop owns retry and rate-limit
+    // pacing (a replayed grant would also burn the sharing quota twice).
+    replayable: false,
+    passStatuses: [200],
+  },
+  'oauth.permissions.delete': {
+    provider: 'google_oauth',
+    method: 'DELETE',
+    destination: 'drive-api',
+    pathPattern: /^\/drive\/v3\/files\/[^/]+\/permissions\/[^/]+$/,
+    queryKeys: ['supportsAllDrives'],
+    requiredQuery: { supportsAllDrives: 'true' },
+    replayable: false,
+    passStatuses: [200, 204],
   },
   'sa.files.get': {
     provider: 'service_account',
@@ -428,6 +492,7 @@ function buildUrl(
       { operation },
     );
   }
+  if (operation === 'oauth.files.list') assertFilesListCorpora(url, operation);
   if (spec.requiredQueryKeys !== undefined) {
     for (const key of spec.requiredQueryKeys) {
       if (!url.searchParams.has(key)) {
@@ -451,6 +516,42 @@ function buildUrl(
     }
   }
   return url;
+}
+
+/**
+ * `files.list` corpora rules (wave 7): the corpus is always explicit and is
+ * either a Shared Drive (`drive`) or the owner's My Drive (`user`). `driveId`
+ * and `includeItemsFromAllDrives` only make sense for `corpora=drive`; they
+ * must never ride along on a My Drive listing, where they could silently
+ * widen it to every Shared Drive the identity can see.
+ */
+function assertFilesListCorpora(url: URL, operation: DriveOperation): void {
+  const corpora = url.searchParams.get('corpora');
+  if (corpora !== 'drive' && corpora !== 'user') {
+    throw new DriveError(
+      'destination-refused',
+      `${operation}: 'corpora' must be 'drive' or 'user'`,
+      { operation },
+    );
+  }
+  if (
+    corpora !== 'drive' &&
+    (url.searchParams.has('driveId') ||
+      url.searchParams.has('includeItemsFromAllDrives'))
+  ) {
+    throw new DriveError(
+      'destination-refused',
+      `${operation}: 'driveId' and 'includeItemsFromAllDrives' require corpora=drive`,
+      { operation },
+    );
+  }
+  if (corpora === 'drive' && !url.searchParams.has('driveId')) {
+    throw new DriveError(
+      'destination-refused',
+      `${operation}: corpora=drive requires a 'driveId'`,
+      { operation },
+    );
+  }
 }
 
 function parseAbsoluteDestination(
@@ -487,6 +588,49 @@ export function assertUploadSessionUri(uri: string): string {
     );
   }
   return uri;
+}
+
+/** Conservative e-mail syntax for a pinned grant body (no display names). */
+const GRANT_EMAIL_PATTERN = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,63}$/;
+
+/**
+ * Reject a request body that does not match the operation's pinned shape, so
+ * a caller can never widen a grant (another role/type, extra fields such as
+ * `allowFileDiscovery`, or a non-e-mail principal) through this transport.
+ */
+function assertPinnedBody(
+  pin: PinnedJsonBody,
+  operation: DriveOperation,
+  body: TransportBody | undefined,
+): void {
+  const refuse = (why: string): never => {
+    throw new DriveError('invalid-input', `${operation}: ${why}`, { operation });
+  };
+  if (body?.kind !== 'json') refuse('a JSON body is required');
+  const json = (body as Extract<TransportBody, { kind: 'json' }>).json;
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) {
+    refuse('the body must be a JSON object');
+  }
+  const record = json as Record<string, unknown>;
+  const actual = Object.keys(record).sort();
+  const expected = [...pin.keys].sort();
+  if (
+    actual.length !== expected.length ||
+    actual.some((key, index) => key !== expected[index])
+  ) {
+    refuse('the body has a field set outside the pinned shape');
+  }
+  for (const [key, literal] of Object.entries(pin.literals)) {
+    if (record[key] !== literal) refuse(`body field '${key}' is not the pinned value`);
+  }
+  const email = record[pin.emailKey];
+  if (
+    typeof email !== 'string' ||
+    email.length > 320 ||
+    !GRANT_EMAIL_PATTERN.test(email)
+  ) {
+    refuse(`body field '${pin.emailKey}' is not a plain e-mail address`);
+  }
 }
 
 /** Drive file/drive/folder/revision ID charset accepted into API paths. */
@@ -798,6 +942,9 @@ export function createDriveTransport(
         );
       }
 
+      if ('pinnedBody' in spec) {
+        assertPinnedBody(spec.pinnedBody, request.operation, request.body);
+      }
       const url = buildUrl(spec, request.operation, request);
       const headers = new Headers(request.headers ?? {});
       headers.set('Authorization', `Bearer ${request.token}`);

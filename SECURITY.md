@@ -66,6 +66,13 @@ database (`DB`) and two SQLite Durable Objects (`ProjectCoordinator`,
   `https://www.googleapis.com/auth/drive` (`GOOGLE_DRIVE_SCOPE`,
   `src/worker/drive/oauth/google.ts`). It has **no content methods** — it
   cannot serve file bytes.
+  It also issues the My Drive pool-grant calls (`oauth.permissions.list`,
+  `.create`, `.delete`). The create body is pinned to exactly
+  `{type:'user', role:'reader', emailAddress}` with
+  `sendNotificationEmail=false` and `supportsAllDrives=true`; `emailAddress`
+  comes only from the stored service-account row, never from a request body;
+  delete only targets a permission id the app recorded when it created it.
+  Service accounts have no `permissions.*` operation.
 - **Service accounts** (`ServiceAccountReadProvider`,
   `src/worker/drive/providers/service-account-read.ts`) handle allowlisted
   content/metadata reads only. The SA transport cannot express a Drive
@@ -79,6 +86,25 @@ database (`DB`) and two SQLite Durable Objects (`ProjectCoordinator`,
   `GOOGLE_CONNECTION_DISABLED` / `DRIVE_UNAVAILABLE` while a broken SA pool
   surfaces as `READ_PROVIDER_UNAVAILABLE` /
   `FILE_NOT_READABLE_BY_POOL` — never conflated.
+
+## My Drive folder mounts
+
+Anyone can share an unrelated file with a service account's address, so "the
+service account can read it" is never treated as proof that a file belongs to a
+mount. For My Drive folder mounts the Worker proves containment itself
+(`src/worker/drive/containment.ts`): it walks the file's `parents` up to the
+mounted folder through the mount's OAuth catalog connection (at most 32 hops;
+a trashed or out-of-tree ancestor, a Shared Drive ancestor, an upstream error
+or a depth overrun all deny) and caches verdicts per isolate for 60 seconds,
+keyed by mount. Denial is the same not-accessible answer as for a missing file,
+and there is no retry through the other provider. Folders moved in the Drive
+web UI become visible after the cache window; app-initiated folder creates and
+trashes drop the changed folder's cached verdict at once (other folders,
+including descendants, keep theirs until expiry). Pool grants are created and
+revoked only for service accounts in the stored pool, the sync endpoint is
+admin-only and origin-checked, and permissions the app did not create are
+never deleted. Responses carry stable codes only (`MOUNT_ROOT_*`, `grant:*`,
+`upload:quota_exceeded`), never Google error text, tokens or permission bodies.
 
 ## Secret handling
 
@@ -178,7 +204,7 @@ operators and release notes do not overclaim:
 - [docs/operations.md](docs/operations.md) — rotation, recovery, retention,
   diagnostics.
 - [docs/google-setup.md](docs/google-setup.md) — OAuth client, scopes and
-  Shared Drive permissions.
+  Shared Drive / My Drive folder permissions.
 - [docs/deployment.md](docs/deployment.md) — provisioning and update rules.
 - [docs/troubleshooting.md](docs/troubleshooting.md) — error-code and
   health-state reference.

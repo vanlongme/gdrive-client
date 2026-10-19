@@ -125,8 +125,8 @@ test.beforeAll(async ({ playwright }) => {
     `INSERT INTO google_connections (id, oauth_client_id, principal_id, display_email, refresh_envelope, granted_scopes, state, enabled, version, connected_by, created_at, updated_at) VALUES` +
       `('${CONN_CATALOG}','${clientRowId}','principal-e2e-1','e2e-catalog@example.test',NULL,'https://www.googleapis.com/auth/drive','connected',1,1,NULL,${now},${now}),` +
       `('${CONN_WRITE}','${clientRowId}','principal-e2e-2','e2e-write@example.test',NULL,'https://www.googleapis.com/auth/drive','connected',1,1,NULL,${now},${now});` +
-      `INSERT INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES` +
-      `('${MOUNT_ID}','E2E Seeded Mount','e2e-drive-1','${CONN_CATALOG}','${CONN_WRITE}',1,'private',1,${now},${now});` +
+      `INSERT INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES` +
+      `('${MOUNT_ID}','E2E Seeded Mount','e2e-drive-1','e2e-drive-1','${CONN_CATALOG}','${CONN_WRITE}',1,'private',1,${now},${now});` +
       `INSERT INTO mount_read_credentials (mount_id, service_account_id, priority, weight, created_at) VALUES` +
       `('${MOUNT_ID}','${saRowId}',0,1,${now});`,
   );

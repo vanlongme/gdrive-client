@@ -16,11 +16,20 @@ Wave 3 bổ sung catalog/admin API, content streaming/Range/revisions/share/tick
 upload state/protocol và UI Explorer/admin. Trạng thái nghiệm thu hiện hành nằm
 trong ledger bên dưới; kết quả local và kiểm thử Google thật được ghi riêng.
 Wave 4/5 bổ sung browser uploader/recovery, folder batches, preview viewers,
-HLS, tab onboarding admin (trang `/admin` mặc định, có Shared Drive chooser),
+HLS, tab onboarding admin (trang `/admin` mặc định, có Shared Drive chooser và
+folder browser My Drive),
 rotation khóa chủ có re-key UploadSession trực tiếp, diagnostics metrics
 trong-isolate và journey fake-Google end-to-end. Đã có một deployment
 Cloudflare đầu tiên qua CLI (2026-10-17, smoke check health/setup đạt); setup
 admin, mount kết nối Google thật và các gate G1–G6 còn lại chưa được xác nhận.
+
+Wave 7 bổ sung mount thư mục My Drive cho tài khoản Gmail cá nhân không có
+Shared Drive: mount là một thư mục do chính operator sở hữu, ứng dụng tự cấp
+quyền Viewer cho các service account trong read pool qua OAuth
+(`permissions.create`, không gửi email), và chỉ file nằm trong thư mục mới truy
+cập được. Trạng thái: local-pass trên fake Google; chưa chạy với Google thật,
+chưa redeploy và chưa áp migration 0007 lên D1 từ xa (các gate cần xác nhận
+của người dùng).
 
 Đặc tả kiến trúc, kế hoạch triển khai và bằng chứng kiểm thử nội bộ được lưu
 ngoài repository public này; tài liệu vận hành nằm trong `docs/` (xem mục
@@ -98,8 +107,10 @@ môi trường đang điều tra, không chặn CI). Bench hiệu năng dưới
 Google thật.
 
 Mục tiêu v1 gồm Explorer, upload phục hồi, preview, chia sẻ có scope và admin.
-Mount v1 là toàn bộ Shared Drive. My Drive, mount cây con, transcoding, overwrite
-và Office editing nằm ngoài phạm vi này.
+Một mount là toàn bộ một Shared Drive hoặc một thư mục do operator sở hữu trong
+My Drive cá nhân. Mount toàn bộ My Drive, thư mục chỉ được chia sẻ với operator,
+mount cây con trong Shared Drive, transcoding, overwrite và Office editing nằm
+ngoài phạm vi này.
 
 Chưa có Git remote hoặc URL public để tạo Deploy button thật. Việc publish/deploy
 và kiểm thử với Cloudflare/Google thật là các gate riêng trong kế hoạch.
@@ -107,7 +118,7 @@ và kiểm thử với Cloudflare/Google thật là các gate riêng trong kế 
 ## Tài liệu vận hành (operator docs)
 
 - [SECURITY.md](SECURITY.md) — mô hình bảo mật, xử lý secret, tách hai provider plane
-- [docs/google-setup.md](docs/google-setup.md) — OAuth Web client, scope, Shared Drive, service account
+- [docs/google-setup.md](docs/google-setup.md) — OAuth Web client, scope, Shared Drive hoặc thư mục My Drive, service account
 - [docs/deployment.md](docs/deployment.md) — dev local, provision D1/DO, staging, backup/restore
 - [docs/operations.md](docs/operations.md) — rotation, recovery, retention, diagnostics (T14)
 - [docs/troubleshooting.md](docs/troubleshooting.md) — bảng mã lỗi và trạng thái vận hành

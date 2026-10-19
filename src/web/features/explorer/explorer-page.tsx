@@ -56,6 +56,7 @@ type ListingState =
       status: "ready";
       entries: DriveFileEntry[];
       nextCursor?: string;
+      partial?: boolean;
       loadingMore: boolean;
     };
 
@@ -285,6 +286,7 @@ export function ExplorerPage() {
               ? [...prev.entries, ...page.entries]
               : page.entries,
           nextCursor: page.nextCursor,
+          partial: "partial" in page && page.partial === true,
           loadingMore: false,
         }));
       } catch (error) {
@@ -785,6 +787,12 @@ export function ExplorerPage() {
         />
       )}
       </div>
+
+      {listing.status === "ready" && listing.partial === true ? (
+        <p className="hint" role="status">
+          {t("explorer.searchPartial")}
+        </p>
+      ) : null}
 
       {listing.status === "ready" && listing.nextCursor !== undefined ? (
         <div className="load-more">

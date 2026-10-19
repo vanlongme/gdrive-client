@@ -18,6 +18,13 @@ import {
   type UpsertMountGrantRequest,
   type CreateAdminUserRequest,
 } from "../../shared/contracts/admin";
+import {
+  ReadGrantProbeResponseSchema,
+  ReadGrantsSyncResponseSchema,
+  type ReadGrantEntry,
+  type ReadGrantProbeResponse,
+  type ReadGrantsSyncResponse,
+} from "../../shared/contracts/read-grants";
 import { z } from "zod";
 import { apiFetch, parseJson } from "./api";
 
@@ -28,6 +35,9 @@ import { apiFetch, parseJson } from "./api";
  *   GET/POST /api/v1/admin/mounts; GET/PATCH /:id -> {mount}
  *   PUT      /api/v1/admin/mounts/:id/read-pool {entries:[{serviceAccountId,priority?,weight?}]} -> {mount}
  *   GET/POST /api/v1/admin/mounts/:id/grants; DELETE /:userId -> {grants}
+ *   GET      /api/v1/admin/drive-folders?connectionId&parentId=root|<id>&pageToken -> {folders,nextPageToken?}
+ *   POST     /api/v1/admin/mounts/:id/read-grants/sync -> {remaining,ready,total,grants,retryAfterSeconds?}
+ *   POST     /api/v1/admin/mounts/:id/read-grants/:serviceAccountId/probe -> {serviceAccountId,result}
  *   GET/POST /api/v1/admin/users; POST /:id/disable|enable -> {user}
  *   GET      /api/v1/admin/provider-health
  * The Google OAuth lifecycle routes (oauth/start, callback, connections
@@ -216,6 +226,63 @@ export function listSharedDrives(
   return apiFetch(`/api/v1/admin/shared-drives?${query.toString()}`, {
     signal,
   }).then((res) => parseJson(res, SharedDriveListResponseSchema));
+}
+
+// --- My Drive folder browser (W7 Task 10) ----------------------------------
+// Folders the OAuth catalog identity owns (`'me' in owners`), one level at a
+// time. The endpoint is B's Task-10 surface; this is the agreed wire shape.
+
+export interface DriveFolderEntry {
+  id: string;
+  name: string;
+}
+
+const DriveFolderListResponseSchema = z.looseObject({
+  folders: z.array(z.looseObject({ id: z.string(), name: z.string() })),
+  nextPageToken: z.string().optional(),
+});
+
+export function listDriveFolders(
+  connectionId: string,
+  params: { parentId: string; pageToken?: string },
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams({
+    connectionId,
+    parentId: params.parentId,
+  });
+  if (params.pageToken !== undefined) query.set("pageToken", params.pageToken);
+  return apiFetch(`/api/v1/admin/drive-folders?${query.toString()}`, {
+    signal,
+  }).then((res) => parseJson(res, DriveFolderListResponseSchema));
+}
+
+// --- Pool read access for My Drive folder mounts (W7 Task 13) ---------------
+// POST .../read-grants/sync does at most 20 Drive mutations per call; the
+// caller repeats until remaining === 0 and honours retryAfterSeconds.
+
+export type ReadGrantRow = ReadGrantEntry;
+export type SyncReadGrantsResponse = ReadGrantsSyncResponse;
+
+export function syncReadGrants(mountId: string, signal?: AbortSignal) {
+  return apiFetch(`/api/v1/admin/mounts/${enc(mountId)}/read-grants/sync`, {
+    method: "POST",
+    jsonBody: {},
+    signal,
+  }).then((res) => parseJson(res, ReadGrantsSyncResponseSchema));
+}
+
+export type ProbeReadGrantResult = ReadGrantProbeResponse["result"];
+
+export function probeReadGrant(
+  mountId: string,
+  serviceAccountId: string,
+  signal?: AbortSignal,
+) {
+  return apiFetch(
+    `/api/v1/admin/mounts/${enc(mountId)}/read-grants/${enc(serviceAccountId)}/probe`,
+    { method: "POST", jsonBody: {}, signal },
+  ).then((res) => parseJson(res, ReadGrantProbeResponseSchema));
 }
 
 // --- Grants ---

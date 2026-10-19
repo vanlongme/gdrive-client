@@ -52,6 +52,7 @@ const publicActor: Actor = { kind: 'public' };
 
 async function resetState() {
   for (const table of [
+    'mount_drive_permissions',
     'audit_events',
     'file_readiness',
     'share_links',
@@ -93,7 +94,7 @@ async function seedBase() {
     .bind(NOW, NOW)
     .run();
   await env.DB.prepare(
-    "INSERT INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, visibility, created_at, updated_at) VALUES ('m-1', 'Mount', 'drive-1', 'conn-1', 'conn-1', 'private', ?, ?)",
+    "INSERT INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, visibility, created_at, updated_at) VALUES ('m-1', 'Mount', 'drive-1', 'drive-1', 'conn-1', 'conn-1', 'private', ?, ?)",
   )
     .bind(NOW, NOW)
     .run();

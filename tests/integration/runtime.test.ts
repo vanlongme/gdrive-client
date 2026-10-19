@@ -290,7 +290,7 @@ describe("Durable Object shells", () => {
           projectId: "proj-1",
           connectionVersion: 1,
           oauthClientVersion: 1,
-          driveId: "drive-1",
+          mountScope: { mountId: "mount-1", rootFolderId: "drive-1", driveId: "drive-1" },
         },
         now: 1,
         leaseMs: 120_000,

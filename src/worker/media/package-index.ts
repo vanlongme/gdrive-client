@@ -33,7 +33,12 @@ import type {
 import { DriveError } from '../drive/errors';
 import { ApiRequestError } from '../drive/mounts';
 import { FOLDER_MIME_TYPE, SHORTCUT_MIME_TYPE } from '../drive/providers/common';
-import { resolveResource } from '../drive/shortcuts';
+import {
+  assertInMount,
+  mountScopeOf,
+  oauthParentLookup,
+} from '../drive/containment';
+import { ResourceScopeError, resolveResource } from '../drive/shortcuts';
 import {
   openWithFailover,
   verifiedFileForRead,
@@ -499,11 +504,12 @@ async function listFolderChildren(
   const cached = ctx.children.get(folderId);
   if (cached !== undefined) return cached;
   const all: CatalogEntry[] = [];
+  const scope = mountScopeOf(ctx.mount);
   let pageToken: string | undefined;
   for (let page = 0; page < HLS_MAX_FOLDER_PAGES; page++) {
     const result = await ctx.oauth.listChildren({
       writer: ctx.writer,
-      driveId: ctx.mount.driveId,
+      scope,
       parentFolderId: folderId,
       ...(pageToken === undefined ? {} : { pageToken }),
       ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
@@ -634,6 +640,7 @@ async function readPlaylistText(
     ctx.mount,
     fileId,
     ctx.signal,
+    ctx.oauth,
   ).catch((err: unknown) => classifyIndexReadError(err, 'playlist'));
   const declared = verified.meta.size;
   if (declared !== undefined && BigInt(declared) > BigInt(HLS_MAX_PLAYLIST_BYTES)) {
@@ -1184,8 +1191,21 @@ async function freshEntryContext(
     }
     throw err;
   });
-  if (meta.trashed === true || meta.driveId !== deps.mount.driveId) {
-    throw new PackageIndexError('scope', 'entry file is outside the mount or trashed');
+  try {
+    await assertInMount(
+      mountScopeOf(deps.mount),
+      meta,
+      oauthParentLookup({
+        provider: deps.oauthProvider,
+        writer: deps.writer,
+        ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+      }),
+    );
+  } catch (err) {
+    if (err instanceof ResourceScopeError) {
+      throw new PackageIndexError('scope', 'entry file is outside the mount or trashed');
+    }
+    throw err;
   }
   const parents = meta.parents ?? [];
   if (parents.length !== 1) {

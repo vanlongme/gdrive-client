@@ -26,6 +26,7 @@ import {
   type MountRecord,
   type ResolvedWriterState,
 } from '../drive/mounts';
+import { mountScopeOf } from '../drive/containment';
 import type { ResolvedWriter } from '../drive/types';
 import type { PinnedUploadWriter, UploadSessionSnapshot } from './upload-internal';
 
@@ -143,7 +144,7 @@ export async function resolveMountWriter(
     mount.writeConnectionId,
     'upload',
   );
-  return { ...state.writer, driveId: mount.driveId };
+  return { ...state.writer, mountScope: mountScopeOf(mount) };
 }
 
 export type PinnedWriterStatus =
@@ -288,7 +289,14 @@ function isUniqueViolation(err: unknown): boolean {
   );
 }
 
-export function pinnedFromRow(row: UploadOperationRow, driveId: string): PinnedUploadWriter {
+/**
+ * Rebuild the pin from the D1 row. The mount scope always comes from the
+ * mount row (rows created before 0007 carry no scope of their own).
+ */
+export function pinnedFromRow(
+  row: UploadOperationRow,
+  mount: Pick<MountRecord, 'id' | 'rootFolderId' | 'driveId'>,
+): PinnedUploadWriter {
   return {
     connectionId: row.pinned_oauth_connection_id,
     principalId: row.pinned_principal_id,
@@ -298,7 +306,7 @@ export function pinnedFromRow(row: UploadOperationRow, driveId: string): PinnedU
     // identity, not admission authority.
     connectionVersion: 1,
     oauthClientVersion: 1,
-    driveId,
+    mountScope: mountScopeOf(mount),
   };
 }
 
@@ -402,6 +410,9 @@ export function viewFromSnapshot(snapshot: UploadSessionSnapshot): UploadView {
     totalBytes: snapshot.totalBytes,
     chunkSize: snapshot.chunkSize,
     readerAccessState: snapshot.readerAccessState,
+    ...(snapshot.blockReason === undefined
+      ? {}
+      : { blockReason: snapshot.blockReason }),
   };
 }
 
@@ -428,6 +439,9 @@ export function viewFromTombstone(row: UploadOperationRow): UploadView {
     chunkSize: view?.chunkSize ?? summary?.chunkSize ?? 8 * 1024 * 1024,
     readerAccessState:
       view?.readerAccessState ?? summary?.readerAccessState ?? 'unchecked',
+    ...(view?.blockReason ?? summary?.blockReason ?? undefined) === undefined
+      ? {}
+      : { blockReason: (view?.blockReason ?? summary?.blockReason) as string },
   };
 }
 
@@ -444,6 +458,7 @@ interface OperationResult {
     totalBytes?: string;
     chunkSize?: number;
     readerAccessState?: UploadView['readerAccessState'];
+    blockReason?: string;
   };
 }
 
@@ -478,7 +493,7 @@ export function parseSummary(raw: string | null): OperationSummary | null {
   }
 }
 
-/** Resolve the mount row for an existing operation (driveId for the pin). */
+/** Resolve the mount row for an existing operation (mount scope for the pin). */
 export async function mountForOperation(
   db: D1Database,
   row: UploadOperationRow,

@@ -244,7 +244,10 @@ export const mounts = sqliteTable(
   {
     id: text('id').primaryKey(),
     label: text('label').notNull(),
-    driveId: text('drive_id').notNull(),
+    /** NULL => My Drive folder mount (migration 0007). */
+    driveId: text('drive_id'),
+    /** Shared Drive mounts: equals driveId (CHECK mounts_root_matches_drive_ck). */
+    rootFolderId: text('root_folder_id').notNull(),
     catalogConnectionId: text('catalog_connection_id')
       .notNull()
       .references(() => googleConnections.id),
@@ -259,7 +262,14 @@ export const mounts = sqliteTable(
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
   },
-  (t) => [index('mounts_drive_id_idx').on(t.driveId)],
+  (t) => [
+    index('mounts_drive_id_idx').on(t.driveId),
+    index('mounts_root_folder_id_idx').on(t.rootFolderId),
+    check(
+      'mounts_root_matches_drive_ck',
+      sql`${t.driveId} IS NULL OR ${t.driveId} = ${t.rootFolderId}`,
+    ),
+  ],
 );
 
 export const mountReadCredentials = sqliteTable(

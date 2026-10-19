@@ -24,6 +24,7 @@ import cycleMasterFixture from '../fixtures/hls/cycle-master.m3u8?raw';
 import type { Actor } from '../../src/worker/auth/grants';
 import type { AuthUser } from '../../src/worker/auth/session';
 import { DriveError } from '../../src/worker/drive/errors';
+import { resetContainmentCacheForTests } from '../../src/worker/drive/containment';
 import type {
   CatalogEntry,
   CatalogPage,
@@ -82,6 +83,7 @@ const userActor = (user: AuthUser): Actor => ({
 
 async function resetState() {
   for (const table of [
+    'mount_drive_permissions',
     'media_package_resources',
     'media_packages',
     'audit_events',
@@ -130,8 +132,8 @@ async function seedBase() {
     .bind(NOW, NOW)
     .run();
   await env.DB.prepare(
-    'INSERT INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) ' +
-      "VALUES ('m-1', 'Mount', 'drive-1', 'conn-1', 'conn-1', 1, 'private', 1, ?, ?)",
+    'INSERT INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) ' +
+      "VALUES ('m-1', 'Mount', 'drive-1', 'drive-1', 'conn-1', 'conn-1', 1, 'private', 1, ?, ?)",
   )
     .bind(NOW, NOW)
     .run();
@@ -455,6 +457,7 @@ async function advanceUntilDone(
 
 beforeEach(async () => {
   await applyD1Migrations(env.DB, TEST_MIGRATIONS);
+  resetContainmentCacheForTests();
   await seedBase();
   currentActor = userActor(viewerUser);
 });
@@ -1204,5 +1207,140 @@ describe('D3 fixes', () => {
     t += 10_000;
     const third = await api(app, `/api/v1/media-packages/${packageId}/advance`, { ...postJson, body: '{}' });
     expect(third.status).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// My Drive folder mount (wave 7): the whole package pipeline under containment.
+// Tree: my-root-1/root-1/{playlists, dir-clip, dir-audio, dir-subs}.
+// ---------------------------------------------------------------------------
+
+const MY_ROOT = 'my-root-1';
+
+/** Drop the Shared Drive id from every file: My Drive files report none. */
+function toMyDrive(drive: FixtureDrive): FixtureDrive {
+  const files = new Map<string, { meta: DriveFileMeta; bytes: string }>();
+  for (const [id, file] of drive.files) {
+    const { driveId, ...rest } = file.meta;
+    void driveId;
+    files.set(id, { bytes: file.bytes, meta: rest });
+  }
+  return { folders: drive.folders, files };
+}
+
+function registerFolderMetas(oauth: FakeOAuthProvider) {
+  const folder = (id: string, parent: string): DriveFileMeta => ({
+    id,
+    name: id,
+    mimeType: 'application/vnd.google-apps.folder',
+    trashed: false,
+    parents: [parent],
+    hasThumbnail: false,
+  });
+  oauth.metaOverrides.set('root-1', folder('root-1', MY_ROOT));
+  for (const dir of ['dir-clip', 'dir-audio', 'dir-subs']) {
+    oauth.metaOverrides.set(dir, folder(dir, 'root-1'));
+  }
+}
+
+describe('media package in a My Drive folder mount', () => {
+  beforeEach(async () => {
+    await env.DB.prepare(
+      "UPDATE mounts SET drive_id = NULL, root_folder_id = ? WHERE id = 'm-1'",
+    )
+      .bind(MY_ROOT)
+      .run();
+  });
+
+  it('indexes, rewrites and serves a package; containment is proven for every resource', async () => {
+    const oauth = new FakeOAuthProvider(toMyDrive(buildDrive()));
+    registerFolderMetas(oauth);
+    const read = new FakeReadProvider(toMyDrive(buildDrive()));
+    const app = makeApp({ oauth, read });
+
+    const created = await createPackage(app);
+    expect(created.status).toBe(201);
+    const { packageId } = (await created.json()) as { packageId: string };
+    const done = await advanceUntilDone(app, packageId);
+    expect(done.status).toBe(200);
+    expect('state' in done.body && done.body.state).toBe('ready');
+
+    // Folder listings carried the My Drive scope.
+    expect(oauth.childrenCalls.length).toBeGreaterThan(0);
+    for (const call of oauth.childrenCalls) {
+      expect(call.scope).toEqual({ mountId: 'm-1', rootFolderId: MY_ROOT, driveId: null });
+    }
+
+    const master = await api(app, `/api/v1/media-packages/${packageId}/resources/r1`);
+    expect(master.status).toBe(200);
+    const masterText = await master.text();
+    const variant = masterText.split('\n').find((l) => /^r\d+$/.test(l));
+    expect(variant).toBeDefined();
+    const media = await api(app, `/api/v1/media-packages/${packageId}/resources/${variant}`);
+    expect(media.status).toBe(200);
+    const segRef = (await media.text()).split('\n').find((l) => /^r\d+$/.test(l));
+    const seg = await api(app, `/api/v1/media-packages/${packageId}/resources/${segRef}`);
+    expect(seg.status).toBe(200);
+    expect(await seg.text()).toBe('SEG0-VIDEO');
+    // Ancestor proofs went through the OAuth fixture, bytes through the SA.
+    expect(oauth.metadataCalls.map((c) => c.ref.id)).toContain('root-1');
+    expect(read.calls.filter((c) => c.op === 'content').length).toBeGreaterThan(0);
+  });
+
+  it('refuses an entry playlist outside the tree at create (404, no package)', async () => {
+    const oauth = new FakeOAuthProvider(toMyDrive(buildDrive()));
+    registerFolderMetas(oauth);
+    const entryMeta = oauth.drive.files.get('f-entry')!.meta;
+    oauth.metaOverrides.set('f-entry', { ...entryMeta, parents: ['elsewhere-1'] });
+    oauth.metaOverrides.set('elsewhere-1', {
+      id: 'elsewhere-1',
+      name: 'elsewhere-1',
+      mimeType: 'application/vnd.google-apps.folder',
+      trashed: false,
+      hasThumbnail: false,
+    });
+    const app = makeApp({ oauth, read: new FakeReadProvider(toMyDrive(buildDrive())) });
+    const res = await createPackage(app);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('FILE_NOT_ACCESSIBLE');
+  });
+
+  it('fails a re-index when the entry file has moved out of the tree (freshEntryContext containment)', async () => {
+    const oauth = new FakeOAuthProvider(toMyDrive(buildDrive()));
+    registerFolderMetas(oauth);
+    const read = new FakeReadProvider(toMyDrive(buildDrive()));
+    const app = makeApp({ oauth, read });
+    const created = await createPackage(app);
+    const { packageId } = (await created.json()) as { packageId: string };
+    expect((await advanceUntilDone(app, packageId)).status).toBe(200);
+
+    // Drift a dependency so the ready generation goes stale (as in the
+    // Shared Drive re-index test), then move the entry out of the tree.
+    const tsMeta = { ...oauth.drive.files.get('f-ts')!.meta, headRevisionId: 'rev-NEW' };
+    oauth.metaOverrides.set('f-ts', tsMeta);
+    read.metaOverrides.set('f-ts', tsMeta);
+    const tsRow = await env.DB
+      .prepare(
+        "SELECT resource_id FROM media_package_resources WHERE package_id = ? AND index_generation = 1 AND path = 'media-ts.m3u8'",
+      )
+      .bind(packageId)
+      .first<{ resource_id: string }>();
+    const stale = await api(app, `/api/v1/media-packages/${packageId}/resources/${tsRow!.resource_id}`);
+    expect(stale.status).toBe(409);
+
+    const entryMeta = oauth.drive.files.get('f-entry')!.meta;
+    oauth.metaOverrides.set('f-entry', { ...entryMeta, parents: ['elsewhere-1'] });
+    oauth.metaOverrides.set('elsewhere-1', {
+      id: 'elsewhere-1',
+      name: 'elsewhere-1',
+      mimeType: 'application/vnd.google-apps.folder',
+      trashed: false,
+      hasThumbnail: false,
+    });
+    // The containment cache still trusts root-1 for up to 60 s; the entry's
+    // new parent was never cached, so the walk is fresh.
+    const advanced = await advanceUntilDone(app, packageId, 5);
+    expect(advanced.status).toBe(404);
+    expect((advanced.body as { error: { code: string } }).error.code).toBe('FILE_NOT_ACCESSIBLE');
   });
 });

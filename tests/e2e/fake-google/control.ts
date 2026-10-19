@@ -161,6 +161,97 @@ export function controlHandler(
         json(res, 200, { revoked: { driveId, principal } });
         return;
       }
+      // ---- My Drive seeding + permission controls --------------------------
+      if (
+        (path === "/__fake__/my-drive/folders" ||
+          path === "/__fake__/my-drive/files") &&
+        req.method === "POST"
+      ) {
+        const body = await readJson(req);
+        const name = typeof body.name === "string" ? body.name : "";
+        if (name === "") {
+          json(res, 400, { error: "name required" });
+          return;
+        }
+        const input = {
+          name,
+          ...(typeof body.id === "string" && body.id !== "" ? { id: body.id } : {}),
+          ...(typeof body.parentId === "string" && body.parentId !== ""
+            ? { parentId: body.parentId }
+            : {}),
+          ...(typeof body.ownerPrincipal === "string" && body.ownerPrincipal !== ""
+            ? { ownerPrincipal: body.ownerPrincipal }
+            : {}),
+        };
+        try {
+          const file =
+            path === "/__fake__/my-drive/folders"
+              ? fake.seedMyDriveFolder(input)
+              : fake.seedMyDriveFile({
+                  ...input,
+                  ...(typeof body.mimeType === "string" ? { mimeType: body.mimeType } : {}),
+                  content:
+                    typeof body.contentB64 === "string"
+                      ? Buffer.from(body.contentB64, "base64")
+                      : typeof body.text === "string"
+                        ? Buffer.from(body.text, "utf8")
+                        : new Uint8Array(0),
+                });
+          json(res, 200, {
+            file: {
+              id: file.id,
+              name: file.name,
+              parentId: file.parents[0] ?? null,
+              ownerPrincipal: file.ownerPrincipal ?? null,
+            },
+          });
+        } catch (err) {
+          json(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        }
+        return;
+      }
+      if (path === "/__fake__/permissions/rate-limit" && req.method === "POST") {
+        const body = await readJson(req);
+        const count =
+          typeof body.count === "number" && Number.isInteger(body.count) && body.count >= 0
+            ? body.count
+            : 0;
+        fake.state.sharingRateLimitExceeded = {
+          remaining: count,
+          ...(typeof body.retryAfterSeconds === "number"
+            ? { retryAfterSeconds: body.retryAfterSeconds }
+            : {}),
+        };
+        json(res, 200, { sharingRateLimitExceeded: fake.state.sharingRateLimitExceeded });
+        return;
+      }
+      const filePermMatch = /^\/__fake__\/files\/([^/]+)\/permissions$/.exec(path);
+      if (filePermMatch !== null) {
+        const fileId = decodeURIComponent(filePermMatch[1] ?? "");
+        if (!fake.state.files.has(fileId)) {
+          json(res, 404, { error: "file not found" });
+          return;
+        }
+        if (req.method === "GET") {
+          json(res, 200, { permissions: fake.state.permissions.get(fileId) ?? [] });
+          return;
+        }
+        if (req.method === "POST") {
+          const body = await readJson(req);
+          const emailAddress = typeof body.emailAddress === "string" ? body.emailAddress : "";
+          if (emailAddress === "") {
+            json(res, 400, { error: "emailAddress required" });
+            return;
+          }
+          const perm = fake.seedPermission(
+            fileId,
+            emailAddress,
+            body.role === "writer" ? "writer" : "reader",
+          );
+          json(res, 200, { permission: perm });
+          return;
+        }
+      }
       const fileFlagMatch = /^\/__fake__\/files\/([^/]+)\/flags$/.exec(path);
       if (fileFlagMatch !== null && req.method === "POST") {
         const file = fake.state.files.get(decodeURIComponent(fileFlagMatch[1] ?? ""));
@@ -171,6 +262,13 @@ export function controlHandler(
         const body = await readJson(req);
         if (typeof body.canDownload === "boolean") file.canDownload = body.canDownload;
         if (typeof body.trashed === "boolean") file.trashed = body.trashed;
+        // Simulates an external move made in the Drive UI (no app request).
+        if (
+          Array.isArray(body.parents) &&
+          body.parents.every((p): p is string => typeof p === "string")
+        ) {
+          file.parents = [...body.parents];
+        }
         if (typeof body.thumbnailContentB64 === "string") {
           file.thumbnailContent = Buffer.from(body.thumbnailContentB64, "base64");
           file.thumbnailLink = `https://lh3.googleusercontent.com/fake-thumb/${file.id}`;
@@ -185,13 +283,21 @@ export function controlHandler(
             id: f.id,
             name: f.name,
             mimeType: f.mimeType,
-            driveId: f.driveId,
+            driveId: f.driveId ?? null,
+            ownerPrincipal: f.ownerPrincipal ?? null,
             parents: f.parents,
             trashed: f.trashed,
             size: f.content?.byteLength ?? null,
             sha256: f.sha256Checksum ?? null,
             revisions: f.revisions.map((r) => r.id),
           })),
+          permissions: Object.fromEntries(
+            [...fake.state.permissions.entries()].map(([fileId, list]) => [
+              fileId,
+              list.map((p) => ({ id: p.id, role: p.role, emailAddress: p.emailAddress })),
+            ]),
+          ),
+          myDriveRoots: Object.fromEntries(fake.state.myDriveRoots),
           members: Object.fromEntries(
             [...fake.state.members.entries()].map(([d, m]) => [
               d,

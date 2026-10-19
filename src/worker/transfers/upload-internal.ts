@@ -19,6 +19,7 @@
  */
 
 import type { DriveFileMeta, ResolvedWriter } from '../drive/types';
+import type { MountScope } from '../drive/containment';
 import type { UploadState } from '../../shared/contracts/uploads';
 import type {
   DecimalBytes,
@@ -31,15 +32,49 @@ import type {
 
 /**
  * The writer identity an upload operation is bound to for its whole life
- * (spec §5.3, §6.2). `driveId` is pinned alongside the credential tuple so
- * renewal lookups can re-prove access on the exact destination drive. The
- * credential versions are snapshots taken at pin time; the route re-resolves
- * CURRENT row versions (same immutable identity — a same-principal
- * reconnect bumps versions, never substitutes identity) before every
- * remote call.
+ * (spec §5.3, §6.2), plus the destination `mountScope` (root folder and
+ * Shared Drive id, or null for a My Drive folder mount) so renewal lookups
+ * re-prove access on the exact mount. Credential versions are pin-time
+ * snapshots; routes re-resolve current row versions before remote calls.
  */
 export interface PinnedUploadWriter extends ResolvedWriter {
-  readonly driveId: string;
+  readonly mountScope: MountScope;
+}
+
+/** Stable blocked reason for Google storageQuotaExceeded (spec 2026-10-18 §4.3). */
+export const UPLOAD_QUOTA_EXCEEDED = 'upload:quota_exceeded';
+
+/** True for a well-formed scope pinned to `mountId` (Shared Drive: root = drive). */
+export function isMountScope(value: unknown, mountId: string): value is MountScope {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (v.mountId !== mountId) return false;
+  if (typeof v.rootFolderId !== 'string' || v.rootFolderId === '') return false;
+  if (v.driveId === null) return true;
+  return typeof v.driveId === 'string' && v.driveId === v.rootFolderId;
+}
+
+/**
+ * Parse a persisted pin. UploadSession records written before wave 7 carry
+ * `driveId` instead of `mountScope`; those were always Shared Drive mounts
+ * whose root folder is the drive, so the scope is derived exactly.
+ */
+export function pinnedWriterFromJson(json: string, mountId: string): PinnedUploadWriter {
+  const raw = JSON.parse(json) as PinnedUploadWriter & { readonly driveId?: unknown };
+  if (isMountScope(raw.mountScope, mountId)) return raw;
+  const { driveId, ...writer } = raw;
+  if (typeof driveId === 'string' && driveId !== '') {
+    return { ...writer, mountScope: { mountId, rootFolderId: driveId, driveId } };
+  }
+  throw new Error('persisted pinned writer has no mount scope');
+}
+
+/**
+ * Upload-path drive check by scope: a Shared Drive file must report the
+ * exact driveId; a My Drive file must report none.
+ */
+export function driveMatchesScope(driveId: string | undefined, scope: MountScope): boolean {
+  return scope.driveId === null ? driveId === undefined : driveId === scope.driveId;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +231,7 @@ export type UploadDirective =
       readonly generation: number;
       readonly writer: ResolvedWriter;
       readonly fileId: string;
-      readonly driveId: string;
+      readonly mountScope: MountScope;
     }
   /** Open a fresh resumable session for the same generated ID. */
   | {
@@ -205,8 +240,8 @@ export type UploadDirective =
       readonly generation: number;
       readonly writer: ResolvedWriter;
       readonly generatedFileId: string;
-      /** Pinned destination drive for the writable-destination proof. */
-      readonly driveId: string;
+      /** Pinned destination mount for the writable-destination proof. */
+      readonly mountScope: MountScope;
       readonly upload: {
         readonly parentId: string;
         readonly name: string;
@@ -227,8 +262,8 @@ export type UploadDirective =
       readonly attemptId: string;
       readonly generation: number;
       readonly writer: ResolvedWriter;
-      /** Pinned destination drive — the only scope trash may act under. */
-      readonly driveId: string;
+      /** Pinned destination mount — the only scope trash may act under. */
+      readonly mountScope: MountScope;
       readonly file: DriveFileMeta;
     }
   /** Verify identity/parent/size/checksum, then 'verify-result'. */
@@ -240,7 +275,7 @@ export type UploadDirective =
       readonly fileId: string;
       readonly expected: {
         readonly parentId: string;
-        readonly driveId: string;
+        readonly mountScope: MountScope;
         readonly totalBytes: DecimalBytes;
         readonly sha256: string;
         readonly md5: string;

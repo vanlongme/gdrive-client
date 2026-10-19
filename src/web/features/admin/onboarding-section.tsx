@@ -22,7 +22,8 @@ import { SharedDriveChooser } from "./shared-drive-chooser";
  * callback to register in Google Cloud, the OAuth client import, the
  * operator connection with its principal/scopes, the SA import plus Viewer
  * membership instructions, and the Shared Drive chooser that fills the
- * existing mount form (catalog/write/read stay separate). Nothing here
+ * existing mount form (My Drive folders are picked in the mount form's own
+ * tab; catalog/write/read stay separate). Nothing here
  * mutates state on render and no secret material is ever displayed.
  */
 
@@ -260,6 +261,7 @@ export function OnboardingSection({
           connectionId={chooserConnectionId}
           onPick={onPickDrive}
         />
+        <p className="hint">{t("admin.onboardFolderHint")}</p>
         <button
           type="button"
           className="btn btn-ghost btn-sm"

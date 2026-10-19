@@ -108,10 +108,10 @@ async function seedWriter(
     )
     .run();
   await env.DB.prepare(
-    'INSERT INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) ' +
-      "VALUES (?, ?, ?, ?, ?, 1, 'private', 1, 0, 0)",
+    'INSERT INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) ' +
+      "VALUES (?, ?, ?, ?, ?, ?, 1, 'private', 1, 0, 0)",
   )
-    .bind(mountId, `M-${id}`, `drive-${id}`, connectionId, connectionId)
+    .bind(mountId, `M-${id}`, `drive-${id}`, `drive-${id}`, connectionId, connectionId)
     .run();
   return {
     userId,
@@ -127,7 +127,7 @@ async function seedWriter(
       projectId,
       connectionVersion,
       oauthClientVersion: clientVersion,
-      driveId: `drive-${id}`,
+      mountScope: { mountId, rootFolderId: `drive-${id}`, driveId: `drive-${id}` },
     },
   };
 }
@@ -423,7 +423,7 @@ describe('refreshPinnedWriter (R2)', () => {
       projectId: 'proj-x',
       connectionVersion: 1,
       oauthClientVersion: 1,
-      driveId: 'drive-x',
+      mountScope: { mountId: 'mount-x', rootFolderId: 'drive-x', driveId: 'drive-x' },
     };
     const status = await refreshPinnedWriter(env.DB, pinned);
     expect(status.ok).toBe(false);

@@ -131,7 +131,10 @@ export interface FakeFileState {
   id: string;
   name: string;
   mimeType: string;
-  driveId: string;
+  /** null for My Drive files (Google omits driveId there). */
+  driveId: string | null;
+  /** My Drive owner permissionId; null for Shared Drive files. */
+  ownerPrincipal: string | null;
   parents: string[];
   trashed: boolean;
   size: number | null;
@@ -147,6 +150,105 @@ export async function fakeState(request: APIRequestContext): Promise<{
     files: FakeFileState[];
     members: Record<string, Record<string, string>>;
   };
+}
+
+// ---------------------------------------------------------------------------
+// My Drive seeding + permission inspection (fake-google control API).
+// ---------------------------------------------------------------------------
+
+export interface SeededMyDriveEntry {
+  id: string;
+  name: string;
+  parentId: string | null;
+  ownerPrincipal: string | null;
+}
+
+export interface MyDriveSeedOptions {
+  id?: string;
+  /** Defaults to the owner's My Drive root. */
+  parentId?: string;
+  /** Defaults to the fake's OAuth principal ("perm-fake-operator"). */
+  ownerPrincipal?: string;
+}
+
+export async function seedMyDriveFolder(
+  request: APIRequestContext,
+  name: string,
+  options: MyDriveSeedOptions = {},
+): Promise<SeededMyDriveEntry> {
+  const body = (await controlFetch(request, "POST", "/__fake__/my-drive/folders", {
+    name,
+    ...options,
+  })) as { file: SeededMyDriveEntry };
+  return body.file;
+}
+
+export async function seedMyDriveFile(
+  request: APIRequestContext,
+  name: string,
+  options: MyDriveSeedOptions & { text?: string; contentB64?: string; mimeType?: string } = {},
+): Promise<SeededMyDriveEntry> {
+  const body = (await controlFetch(request, "POST", "/__fake__/my-drive/files", {
+    name,
+    ...options,
+  })) as { file: SeededMyDriveEntry };
+  return body.file;
+}
+
+export interface FakePermissionState {
+  id: string;
+  type: "user";
+  role: "reader" | "writer";
+  emailAddress: string;
+}
+
+/** Direct permissions currently on a fake file (folder-level grants). */
+export async function listPermissions(
+  request: APIRequestContext,
+  fileId: string,
+): Promise<FakePermissionState[]> {
+  const body = (await controlFetch(
+    request,
+    "GET",
+    `/__fake__/files/${encodeURIComponent(fileId)}/permissions`,
+  )) as { permissions: FakePermissionState[] };
+  return body.permissions;
+}
+
+/** Grant a permission out-of-band, e.g. a pre-existing foreign share. */
+export async function seedPermission(
+  request: APIRequestContext,
+  fileId: string,
+  emailAddress: string,
+  role: "reader" | "writer" = "reader",
+): Promise<void> {
+  await controlFetch(request, "POST", `/__fake__/files/${encodeURIComponent(fileId)}/permissions`, {
+    emailAddress,
+    role,
+  });
+}
+
+/** Make the next `count` permissions.create calls answer sharingRateLimitExceeded. */
+export async function injectSharingRateLimit(
+  request: APIRequestContext,
+  count: number,
+  retryAfterSeconds?: number,
+): Promise<void> {
+  await controlFetch(request, "POST", "/__fake__/permissions/rate-limit", {
+    count,
+    ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+  });
+}
+
+/** Simulate an external move in the Drive UI: replaces the file's parents. */
+export async function moveFakeFile(
+  request: APIRequestContext,
+  fileId: string,
+  parents: string[],
+): Promise<void> {
+  await controlFetch(request, "POST", `/__fake__/files/${encodeURIComponent(fileId)}/flags`, {
+    parents,
+  });
 }
 
 // ---------------------------------------------------------------------------

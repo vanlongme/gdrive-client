@@ -20,6 +20,7 @@ import {
   createFakeState,
   type DriveRole,
   type FakeFile,
+  type FakePermission,
   type FakeProvider,
   type FakeRequestLogEntry,
   type FakeState,
@@ -97,7 +98,8 @@ function classifySurface(
     path,
   );
   if (permMatch !== null) {
-    return { policy: "oauth", operation: `permissions.${method.toLowerCase()}` };
+    const verb = { GET: "list", POST: "create", DELETE: "delete" }[method];
+    return { policy: "oauth", operation: `permissions.${verb ?? method.toLowerCase()}` };
   }
   const fileMatch = /^\/drive\/v3\/files\/[^/]+$/.exec(path);
   if (fileMatch !== null) {
@@ -131,6 +133,7 @@ function googleError(
   status: number,
   reason: string,
   message: string,
+  headers?: Record<string, string>,
 ): Response {
   return Response.json(
     {
@@ -142,7 +145,7 @@ function googleError(
         ],
       },
     },
-    { status },
+    { status, ...(headers === undefined ? {} : { headers }) },
   );
 }
 
@@ -182,6 +185,27 @@ export interface FakeGoogle {
   handle(request: Request): Promise<Response>;
   /** Synchronous snapshot of the request log (defensive copy). */
   requests(): FakeRequestLogEntry[];
+  /** The principal's My Drive root folder (created on first use). */
+  ensureMyDriveRoot(principal: string): FakeFile;
+  /** Seed a My Drive folder; the parent defaults to the owner's root. */
+  seedMyDriveFolder(input: SeedMyDriveInput): FakeFile;
+  seedMyDriveFile(
+    input: SeedMyDriveInput & { content?: Uint8Array; mimeType?: string },
+  ): FakeFile;
+  /** Add a direct reader/writer permission without an API call. */
+  seedPermission(
+    fileId: string,
+    emailAddress: string,
+    role: FakePermission["role"],
+  ): FakePermission;
+}
+
+export interface SeedMyDriveInput {
+  id?: string;
+  name: string;
+  parentId?: string;
+  /** Defaults to the fake's OAuth principal (the journey operator). */
+  ownerPrincipal?: string;
 }
 
 interface TokenContext {
@@ -233,14 +257,133 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
     return state.members.get(driveId)?.get(principal);
   }
 
+  type MyDriveRole = "owner" | "writer" | "reader";
+
+  /**
+   * My Drive access: the file's owner, OR a permission on the file or any
+   * ancestor (inherited down the parent chain). Strongest role wins.
+   */
+  function myDriveRoleOf(
+    ctx: TokenContext,
+    file: FakeFile,
+  ): MyDriveRole | undefined {
+    if (file.ownerPrincipal === ctx.principal) return "owner";
+    const principal = ctx.principal.toLowerCase();
+    const seen = new Set<string>();
+    let best: MyDriveRole | undefined;
+    let cursor: FakeFile | undefined = file;
+    while (cursor !== undefined && !seen.has(cursor.id) && seen.size < 64) {
+      seen.add(cursor.id);
+      for (const perm of state.permissions.get(cursor.id) ?? []) {
+        if (perm.emailAddress.toLowerCase() !== principal) continue;
+        best = perm.role === "writer" ? "writer" : (best ?? "reader");
+      }
+      const parentId: string | undefined = cursor.parents[0];
+      cursor = parentId === undefined ? undefined : state.files.get(parentId);
+    }
+    return best;
+  }
+
   function canRead(ctx: TokenContext, file: FakeFile): boolean {
-    const role = roleOf(file.driveId, ctx.principal);
-    return role !== undefined;
+    if (file.driveId === undefined) return myDriveRoleOf(ctx, file) !== undefined;
+    return roleOf(file.driveId, ctx.principal) !== undefined;
   }
 
   function canWrite(ctx: TokenContext, driveId: string): boolean {
     const role = roleOf(driveId, ctx.principal);
     return role === "writer" || role === "organizer";
+  }
+
+  /** Write access to one file: Shared Drive membership or My Drive role. */
+  function canWriteFile(ctx: TokenContext, file: FakeFile): boolean {
+    if (file.driveId !== undefined) return canWrite(ctx, file.driveId);
+    const role = myDriveRoleOf(ctx, file);
+    return role === "owner" || role === "writer";
+  }
+
+  function ensureMyDriveRoot(principal: string): FakeFile {
+    const known = state.files.get(state.myDriveRoots.get(principal) ?? "");
+    if (known !== undefined) return known;
+    const id = `my-drive-root-${principal}`.replace(/[^A-Za-z0-9_-]/g, "x");
+    const nowIso = new Date(now()).toISOString();
+    const root: FakeFile = {
+      id,
+      name: "My Drive",
+      mimeType: FOLDER_MIME,
+      parents: [],
+      ownerPrincipal: principal,
+      trashed: false,
+      content: null,
+      exportable: false,
+      canDownload: false,
+      revisions: [],
+      createdTime: nowIso,
+      modifiedTime: nowIso,
+    };
+    state.files.set(id, root);
+    state.myDriveRoots.set(principal, id);
+    return root;
+  }
+
+  function seedMyDriveEntry(
+    input: SeedMyDriveInput,
+    mimeType: string,
+    content: Uint8Array | null,
+  ): FakeFile {
+    const owner = input.ownerPrincipal ?? oauthPrincipal;
+    const parentId = input.parentId ?? ensureMyDriveRoot(owner).id;
+    if (!state.files.has(parentId)) throw new Error(`unknown parent ${parentId}`);
+    const id = input.id ?? nextId("md-");
+    if (state.files.has(id)) throw new Error(`${id} already exists`);
+    const nowIso = new Date(now()).toISOString();
+    const file: FakeFile = {
+      id,
+      name: input.name,
+      mimeType,
+      parents: [parentId],
+      ownerPrincipal: owner,
+      trashed: false,
+      content,
+      exportable: false,
+      canDownload: content !== null,
+      revisions: [],
+      createdTime: nowIso,
+      modifiedTime: nowIso,
+    };
+    if (content !== null) {
+      file.md5Checksum = createHash("md5").update(content).digest("base64");
+      file.sha256Checksum = createHash("sha256").update(content).digest("hex");
+      file.headRevisionId = "rev-1";
+      file.revisions.push({
+        id: "rev-1",
+        mimeType,
+        modifiedTime: nowIso,
+        size: String(content.byteLength),
+        keepForever: true,
+        content,
+      });
+    }
+    state.files.set(id, file);
+    return file;
+  }
+
+  function seedPermission(
+    fileId: string,
+    emailAddress: string,
+    role: FakePermission["role"],
+  ): FakePermission {
+    if (!state.files.has(fileId)) throw new Error(`unknown file ${fileId}`);
+    const list = state.permissions.get(fileId) ?? [];
+    let perm = list.find(
+      (p) => p.emailAddress.toLowerCase() === emailAddress.toLowerCase(),
+    );
+    if (perm === undefined) {
+      perm = { id: nextId("perm-"), type: "user", role, emailAddress };
+      list.push(perm);
+      state.permissions.set(fileId, list);
+    }
+    perm.role = role; // like Google: one grant per user, a repeat updates it
+    return perm;
   }
 
   function authenticate(req: Request): TokenContext | null {
@@ -310,7 +453,12 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
 
   function fileMetaJson(file: FakeFile, ctx: TokenContext): Record<string, unknown> {
     const isFolder = file.mimeType === FOLDER_MIME;
-    const role = roleOf(file.driveId, ctx.principal);
+    const role =
+      file.driveId !== undefined
+        ? roleOf(file.driveId, ctx.principal)
+        : myDriveRoleOf(ctx, file) === "owner"
+          ? "organizer"
+          : myDriveRoleOf(ctx, file);
     return {
       kind: "drive#file",
       id: file.id,
@@ -322,6 +470,9 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
       trashed: file.trashed,
       parents: file.parents,
       driveId: file.driveId,
+      ...(file.driveId === undefined
+        ? { ownedByMe: file.ownerPrincipal === ctx.principal }
+        : {}),
       headRevisionId: file.headRevisionId,
       md5Checksum: file.md5Checksum,
       sha256Checksum: file.sha256Checksum,
@@ -347,7 +498,8 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
   }
 
   function visibleFile(ctx: TokenContext, id: string): FakeFile | Response {
-    const file = state.files.get(id);
+    // `root` is Drive's alias for the caller's own My Drive root folder.
+    const file = state.files.get(id === "root" ? ensureMyDriveRoot(ctx.principal).id : id);
     if (file === undefined || !canRead(ctx, file)) {
       return googleError(404, "notFound", `File not found: ${id}.`);
     }
@@ -380,9 +532,9 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
     };
   }
 
-  async function handleToken(req: Request, path: string): Promise<Response> {
+  async function handleToken(req: Request, path: string, bodyText: string): Promise<Response> {
     if (path === "/revoke" && req.method === "POST") {
-      const form = new URLSearchParams(await req.text());
+      const form = new URLSearchParams(bodyText);
       const token = form.get("token") ?? "";
       const access = state.accessTokens.get(token);
       if (access !== undefined) access.revoked = true;
@@ -393,7 +545,7 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
     if (path !== "/token" || req.method !== "POST") {
       return oauthErrorBody(404, "invalid_request", "unknown token endpoint path");
     }
-    const form = new URLSearchParams(await req.text());
+    const form = new URLSearchParams(bodyText);
     const grantType = form.get("grant_type") ?? "";
 
     if (grantType === "authorization_code") {
@@ -495,7 +647,51 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
     return { bytes: buf, sha256: createHash("sha256").update(buf).digest("hex") };
   }
 
+  /**
+   * corpora=user listing (My Drive): files the caller can access, filtered
+   * by the q terms the worker uses (`'<id>' in parents`, `'me' in owners`,
+   * `name contains`, `mimeType =`, `trashed =`). The root is never listed.
+   */
+  function listUserFiles(ctx: TokenContext, url: URL): Response {
+    if (url.searchParams.has("driveId")) {
+      return googleError(400, "invalid", "driveId requires corpora=drive.");
+    }
+    const q = url.searchParams.get("q") ?? "";
+    const parentToken = /'([^']+)'\s+in\s+parents/.exec(q)?.[1];
+    const parentId =
+      parentToken === "root" ? ensureMyDriveRoot(ctx.principal).id : parentToken;
+    const nameRaw = /name\s+contains\s+'((?:\\'|[^'])*)'/.exec(q)?.[1];
+    const nameTerm = nameRaw?.replace(/\\'/g, "'").replace(/\\\\/g, "\\");
+    const mime = /mimeType\s*=\s*'([^']+)'/.exec(q)?.[1];
+    const trashed = /trashed\s*=\s*(true|false)/.exec(q)?.[1];
+    const onlyMine = /'me'\s+in\s+owners/.test(q);
+    const entries = [...state.files.values()]
+      .filter((f) => f.driveId === undefined && f.parents.length > 0)
+      .filter((f) => canRead(ctx, f))
+      .filter((f) => !onlyMine || f.ownerPrincipal === ctx.principal)
+      .filter((f) => trashed === undefined || f.trashed === (trashed === "true"))
+      .filter((f) => parentId === undefined || f.parents.includes(parentId))
+      .filter((f) => nameTerm === undefined || f.name.includes(nameTerm))
+      .filter((f) => mime === undefined || f.mimeType === mime)
+      .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    const size = Number.parseInt(url.searchParams.get("pageSize") ?? "200", 10);
+    const pageSize = size > 0 ? Math.min(size, 1000) : 200;
+    const offset = Math.max(0, Number.parseInt(url.searchParams.get("pageToken") ?? "0", 10) || 0);
+    return Response.json({
+      kind: "drive#fileList",
+      files: entries.slice(offset, offset + pageSize).map((f) => ({
+        ...listEntryJson(f),
+        parents: f.parents,
+        ownedByMe: f.ownerPrincipal === ctx.principal,
+      })),
+      ...(offset + pageSize < entries.length
+        ? { nextPageToken: String(offset + pageSize) }
+        : {}),
+    });
+  }
+
   function listFiles(ctx: TokenContext, url: URL): Response {
+    if (url.searchParams.get("corpora") === "user") return listUserFiles(ctx, url);
     const driveId = url.searchParams.get("driveId") ?? "";
     const denied = requireDriveMember(ctx, driveId);
     if (denied !== null) return denied;
@@ -566,7 +762,7 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
     if (parent === undefined || parent.mimeType !== FOLDER_MIME) {
       return googleError(404, "notFound", "Parent folder not found.");
     }
-    if (!canWrite(ctx, parent.driveId)) {
+    if (!canWriteFile(ctx, parent)) {
       return googleError(403, "insufficientPermissions", "Insufficient permissions for the parent.");
     }
     if (state.files.has(id)) {
@@ -578,7 +774,9 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
       name: typeof meta.name === "string" ? meta.name : "untitled",
       mimeType: typeof meta.mimeType === "string" ? meta.mimeType : "application/octet-stream",
       parents: parentIds,
-      driveId: parent.driveId,
+      ...(parent.driveId === undefined
+        ? { ownerPrincipal: ctx.principal }
+        : { driveId: parent.driveId }),
       trashed: false,
       content: null,
       exportable: false,
@@ -643,7 +841,7 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
         });
       }
       const slice = content.subarray(start, end + 1);
-      return new Response(slice.slice().buffer as ArrayBuffer, {
+      return new Response(new Uint8Array(slice), {
         status: 206,
         headers: {
           ...baseHeaders,
@@ -652,7 +850,7 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
         },
       });
     }
-    return new Response(content.slice().buffer as ArrayBuffer, {
+    return new Response(new Uint8Array(content), {
       status: 200,
       headers: { ...baseHeaders, "content-length": String(total) },
     });
@@ -712,7 +910,12 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
         return { res: Response.json(fileMetaJson(file, ctx), { status: 200 }), requestBytes: 0 };
       }
     }
-    if (!canWrite(ctx, session.driveId)) {
+    const target = state.files.get(session.fileId);
+    if (
+      session.driveId !== undefined
+        ? !canWrite(ctx, session.driveId)
+        : target === undefined || !canWriteFile(ctx, target)
+    ) {
       return {
         res: googleError(403, "insufficientPermissions", "Insufficient permissions."),
         requestBytes: 0,
@@ -854,6 +1057,87 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
   }
 
   // -------------------------------------------------------------------------
+  // My Drive permissions.list / create / delete (inherited by descendants;
+  // Shared Drive files keep the membership semantics in the dispatch below).
+  // -------------------------------------------------------------------------
+
+  async function handleMyDrivePermissions(
+    req: Request,
+    ctx: TokenContext,
+    url: URL,
+    file: FakeFile,
+    permissionId: string | undefined,
+  ): Promise<{ res: Response; bytes: number }> {
+    const role = myDriveRoleOf(ctx, file);
+    if (role === undefined) {
+      return { res: googleError(404, "notFound", `File not found: ${file.id}.`), bytes: 0 };
+    }
+    if (role === "reader") {
+      return { res: googleError(403, "insufficientFilePermissions", "Not allowed to share."), bytes: 0 };
+    }
+    const direct = state.permissions.get(file.id) ?? [];
+    const asJson = (p: FakePermission) => ({ kind: "drive#permission", ...p });
+
+    if (req.method === "GET" && permissionId === undefined) {
+      const ownerEmail = file.ownerPrincipal === oauthPrincipal ? oauthEmail : file.ownerPrincipal;
+      const all: unknown[] = [
+        ...(ownerEmail === undefined ? [] : [{ id: `owner-${file.id}`, type: "user", role: "owner", emailAddress: ownerEmail }]),
+        ...direct.map(asJson),
+      ];
+      const size = Number.parseInt(url.searchParams.get("pageSize") ?? "100", 10);
+      const pageSize = size > 0 ? Math.min(size, 100) : 100;
+      const offset = Math.max(0, Number.parseInt(url.searchParams.get("pageToken") ?? "0", 10) || 0);
+      return {
+        res: Response.json({
+          kind: "drive#permissionList",
+          permissions: all.slice(offset, offset + pageSize),
+          ...(offset + pageSize < all.length ? { nextPageToken: String(offset + pageSize) } : {}),
+        }),
+        bytes: 0,
+      };
+    }
+
+    if (req.method === "POST" && permissionId === undefined) {
+      const { bytes } = await readBody(req);
+      const reply = (res: Response) => ({ res, bytes: bytes.byteLength });
+      // The app must never notify SA addresses: absent or true is a bug.
+      if (url.searchParams.get("sendNotificationEmail") !== "false") {
+        return reply(googleError(400, "badRequest", "fake-google: permissions.create requires sendNotificationEmail=false."));
+      }
+      let body: { type?: unknown; role?: unknown; emailAddress?: unknown } = {};
+      try {
+        body = JSON.parse(new TextDecoder().decode(bytes)) as typeof body;
+      } catch {
+        return reply(googleError(400, "badRequest", "Malformed body."));
+      }
+      const email = typeof body.emailAddress === "string" ? body.emailAddress : "";
+      if (body.type !== "user" || (body.role !== "reader" && body.role !== "writer") || email === "") {
+        return reply(googleError(400, "badRequest", "type=user, role=reader|writer and emailAddress are required."));
+      }
+      const limit = state.sharingRateLimitExceeded;
+      if (limit.remaining > 0) {
+        limit.remaining -= 1;
+        return reply(googleError(403, "sharingRateLimitExceeded", "Rate limit exceeded for sharing.",
+          limit.retryAfterSeconds === undefined ? undefined : { "retry-after": String(limit.retryAfterSeconds) }));
+      }
+      return reply(Response.json(asJson(seedPermission(file.id, email, body.role))));
+    }
+
+    if (req.method === "DELETE" && permissionId !== undefined) {
+      const index = direct.findIndex((p) => p.id === permissionId);
+      if (permissionId.startsWith("owner-")) {
+        return { res: googleError(403, "forbidden", "The owner permission cannot be removed."), bytes: 0 };
+      }
+      if (index < 0) {
+        return { res: googleError(404, "notFound", `Permission not found: ${permissionId}.`), bytes: 0 };
+      }
+      direct.splice(index, 1);
+      return { res: new Response(null, { status: 204 }), bytes: 0 };
+    }
+    return { res: googleError(405, "badRequest", "Method not allowed."), bytes: 0 };
+  }
+
+  // -------------------------------------------------------------------------
   // Dispatch
   // -------------------------------------------------------------------------
 
@@ -865,24 +1149,29 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
 
     // Token endpoint: identity comes from grant material, not a bearer.
     if (host === GOOGLE_TOKEN_HOST) {
-      const body = req.method === "POST" ? await req.clone().text() : "";
-      const res = await handleToken(req, url.pathname);
-      const resClone = res.clone();
+      const body = req.method === "POST" ? await req.text() : "";
+      const res = await handleToken(req, url.pathname, body);
       let provider: FakeProvider = "none";
       let principal: string | null = null;
-      const grantType = new URLSearchParams(body).get("grant_type") ?? "";
-      if (grantType === JWT_BEARER_GRANT) provider = "service_account";
-      if (grantType === "authorization_code" || grantType === "refresh_token") {
-        provider = "oauth";
-      }
-      if (res.ok && provider !== "none") {
+      const form = new URLSearchParams(body);
+      const grantType = form.get("grant_type") ?? "";
+      if (grantType === JWT_BEARER_GRANT) {
+        provider = "service_account";
         try {
-          const parsed = (await resClone.json()) as { access_token?: string };
-          const issued = state.accessTokens.get(parsed.access_token ?? "");
-          principal = issued?.principal ?? null;
+          const payload = (form.get("assertion") ?? "").split(".")[1] ?? "";
+          const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { iss?: unknown };
+          principal = typeof claims.iss === "string" ? claims.iss : null;
         } catch {
           // leave principal null
         }
+      }
+      if (grantType === "authorization_code") {
+        provider = "oauth";
+        principal = state.authCodes.get(form.get("code") ?? "")?.principal ?? null;
+      }
+      if (grantType === "refresh_token") {
+        provider = "oauth";
+        principal = state.refreshTokens.get(form.get("refresh_token") ?? "")?.principal ?? null;
       }
       log.push({
         seq: seq++,
@@ -929,7 +1218,7 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
         file !== undefined &&
         file.thumbnailContent !== undefined &&
         canRead(ctx, file)
-          ? new Response(file.thumbnailContent.slice().buffer as ArrayBuffer, {
+          ? new Response(new Uint8Array(file.thumbnailContent), {
               status: 200,
               headers: { "content-type": "image/png" },
             })
@@ -1059,7 +1348,7 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
           if (file instanceof Response) {
             return respond(req, rule, ctx, file, { requestBytes: 0, responseBytes: 0 });
           }
-          if (!canWrite(ctx, file.driveId)) {
+          if (!canWriteFile(ctx, file)) {
             return respond(req, rule, ctx, googleError(403, "insufficientPermissions", "Insufficient permissions."), {
               requestBytes: 0, responseBytes: 0,
             });
@@ -1104,6 +1393,12 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
           return respond(req, rule, ctx, googleError(404, "notFound", "File not found."), {
             requestBytes: 0, responseBytes: 0,
           });
+        }
+        if (file.driveId === undefined) {
+          const out = await handleMyDrivePermissions(
+            req, ctx, url, file, permMatch[2] === undefined ? undefined : decodeURIComponent(permMatch[2]),
+          );
+          return respond(req, rule, ctx, out.res, { requestBytes: out.bytes, responseBytes: 0 });
         }
         if (req.method === "GET") {
           const members = [...(state.members.get(file.driveId)?.entries() ?? [])].map(
@@ -1188,7 +1483,7 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
             requestBytes: 0, responseBytes: 0,
           });
         }
-        return respond(req, rule, ctx, new Response(file.content.slice().buffer as ArrayBuffer, {
+        return respond(req, rule, ctx, new Response(new Uint8Array(file.content), {
           status: 200,
           headers: { "content-type": url.searchParams.get("mimeType") ?? "application/pdf", "content-length": String(file.content.byteLength) },
         }), { requestBytes: 0, responseBytes: file.content.byteLength });
@@ -1209,5 +1504,10 @@ export function createFakeGoogle(options: FakeGoogleOptions = {}): FakeGoogle {
     log,
     handle: (request: Request) => handle(request),
     requests: () => log.map((entry) => ({ ...entry, queryKeys: [...entry.queryKeys] })),
+    ensureMyDriveRoot,
+    seedMyDriveFolder: (input) => seedMyDriveEntry(input, FOLDER_MIME, null),
+    seedMyDriveFile: (input) =>
+      seedMyDriveEntry(input, input.mimeType ?? "application/octet-stream", input.content ?? new Uint8Array(0)),
+    seedPermission,
   };
 }

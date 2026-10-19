@@ -437,7 +437,14 @@ async function handleReadiness(c: RouterContext, deps: ContentRouteDeps) {
     let state: ReadinessView['readerAccessState'] = 'blocked';
     let reason: string | undefined;
     try {
-      await verifiedFileForRead(provider, c.env, mount, fileId, c.req.raw.signal);
+      await verifiedFileForRead(
+        provider,
+        c.env,
+        mount,
+        fileId,
+        c.req.raw.signal,
+        deps.oauthProvider,
+      );
       state = 'readable';
     } catch (err) {
       const verdict = readinessFailure(err);

@@ -13,6 +13,8 @@
 
 import { isDriveError } from '../drive/errors';
 import type { DriveFileMeta, OAuthCatalogWriteProvider } from '../drive/types';
+import { invalidateFolder, isInMount, oauthParentLookup } from '../drive/containment';
+import { driveMatchesScope } from './upload-internal';
 import type { UploadDirective, UploadSessionEvent } from './upload-internal';
 
 export type TrashDirective = Extract<UploadDirective, { kind: 'trash' }>;
@@ -60,14 +62,14 @@ async function readCurrentMeta(
   }
 }
 
-/** Same object, on the pinned drive, affirmatively in the trash. */
+/** Same object, on the pinned drive (by scope), affirmatively in the trash. */
 function provesTrashed(
   meta: DriveFileMeta,
   directive: TrashDirective,
 ): boolean {
   return (
     meta.id === directive.file.id &&
-    meta.driveId === directive.driveId &&
+    driveMatchesScope(meta.driveId, directive.mountScope) &&
     meta.trashed === true
   );
 }
@@ -88,7 +90,7 @@ export async function runTrash(args: {
 }): Promise<UploadSessionEvent> {
   const { directive } = args;
   const fileId = directive.file.id;
-  if (fileId === '' || directive.driveId === '') {
+  if (fileId === '' || directive.mountScope.rootFolderId === '') {
     return failed('unpinned-file');
   }
 
@@ -102,12 +104,33 @@ export async function runTrash(args: {
   if (meta.id !== fileId) {
     return failed('precheck:id-mismatch');
   }
-  if (meta.driveId !== directive.driveId) {
+  if (!driveMatchesScope(meta.driveId, directive.mountScope)) {
     return failed('precheck:drive-mismatch');
   }
   if (meta.trashed === true) {
     // Fresh evidence proves the pinned file is already trashed.
     return DONE;
+  }
+  if (directive.mountScope.driveId === null) {
+    // My Drive has no drive id to compare: the pinned file must still sit
+    // inside the mount's folder tree before the writer may trash it.
+    let contained: boolean;
+    try {
+      contained = await isInMount(
+        directive.mountScope,
+        meta,
+        oauthParentLookup({
+          provider: args.provider,
+          writer: directive.writer,
+          ...(args.signal === undefined ? {} : { signal: args.signal }),
+        }),
+      );
+    } catch (err) {
+      return failed(`precheck:${isDriveError(err) ? err.reason : 'transport-error'}`);
+    }
+    if (!contained) {
+      return failed('precheck:outside-mount');
+    }
   }
   if (meta.capabilities?.canTrash !== true) {
     // Require an affirmative capability — absent is not permission.
@@ -125,6 +148,8 @@ export async function runTrash(args: {
       },
       ...(args.signal === undefined ? {} : { signal: args.signal }),
     });
+    // A trashed folder must not keep a cached in-mount verdict.
+    invalidateFolder(directive.mountScope, fileId);
     return DONE;
   } catch (err) {
     if (!isDriveError(err)) {

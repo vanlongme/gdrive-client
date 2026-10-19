@@ -13,9 +13,10 @@
  *   - credential identity rules are enforced: same SA (project_id, email)
  *     rotates the key with version+1, a different SA is a new credential id;
  *     the same OAuth client_id updates in place, a new client_id is a new row;
- *   - mount writes validate the Shared Drive through the OAuth catalog
- *     connection (driveId root + folder type + writer canAddChildren) before
- *     any row is persisted — the SA pool is never consulted for writes;
+ *   - mount writes validate the root through the OAuth catalog and write
+ *     connections (Shared Drive root, or an owned non-root My Drive folder,
+ *     plus writer canAddChildren) before any row is persisted — the SA pool
+ *     is never consulted for writes;
  *   - disabling is a version bump so in-flight admissions fail closed.
  */
 
@@ -70,9 +71,12 @@ import {
   failureFromError,
   getMount,
   requireUsableOAuthWriter,
+  type MountKind,
   type MountRecord,
 } from '../drive/mounts';
-import type { OAuthCatalogWriteProvider } from '../drive/types';
+import type { DriveFileMeta, OAuthCatalogWriteProvider } from '../drive/types';
+import { mountKindOf, mountScopeOf } from '../drive/containment';
+import { readGrantCounts } from '../drive/read-grants';
 import {
   clientProjectFromClientId,
   listServiceAccounts,
@@ -172,7 +176,7 @@ function iso(ms: number): string {
 // (spec §10.1 audit_events). Never carries secret material.
 // ---------------------------------------------------------------------------
 
-async function recordAudit(
+export async function recordAudit(
   db: D1Database,
   fields: {
     requestId: string;
@@ -286,9 +290,15 @@ async function mountAdminView(
       createdAt: r.created_at,
     }),
   );
+  const kind = mountKindOf(mountScopeOf(mount));
+  // Only My Drive folder mounts keep grant rows (spec section 5).
+  const readGrants =
+    kind === 'my_drive_folder' ? await readGrantCounts(db, mount.id) : undefined;
   return {
     id: mount.id,
     label: mount.label,
+    kind,
+    rootFolderId: mount.rootFolderId,
     driveId: mount.driveId,
     catalogConnectionId: mount.catalogConnectionId,
     writeConnectionId: mount.writeConnectionId,
@@ -296,6 +306,7 @@ async function mountAdminView(
     visibility: mount.visibility,
     policyVersion: mount.policyVersion,
     readPool,
+    ...(readGrants === undefined ? {} : { readGrants }),
   };
 }
 
@@ -362,72 +373,100 @@ function isSharedDriveRoot(
   );
 }
 
+/** Outcome of mount target validation: the server decides the kind. */
+export interface MountTarget {
+  readonly kind: MountKind;
+  readonly rootFolderId: string;
+  /** Shared Drive: equals rootFolderId; My Drive folder: null. */
+  readonly driveId: string | null;
+}
+
+function mountTargetError(code: Extract<ApiErrorCode, `MOUNT_${string}`>, message: string): ApiRequestError {
+  return new ApiRequestError(400, code, message);
+}
+
+/** Same owned, non-trashed My Drive folder as seen by the write identity. */
+function isSameOwnedMyDriveFolder(meta: DriveFileMeta, rootFolderId: string): boolean {
+  return (
+    meta.id === rootFolderId &&
+    meta.driveId === undefined &&
+    meta.mimeType === FOLDER_MIME_TYPE &&
+    meta.trashed !== true &&
+    meta.ownedByMe === true
+  );
+}
+
 /**
- * Affirmatively validate the mount targets (coordinator review R10): the
- * catalog connection must resolve driveId to the Shared Drive root (exact
- * id + driveId match, folder MIME, not trashed); the write connection must
- * resolve the SAME root through ITS identity AND report
- * capabilities.canAddChildren === true — a missing capability is not
- * permission. All checks are OAuth-only — the SA pool is never consulted
- * for write capability (spec §5.1).
+ * Affirmatively validate the mount root (coordinator review R10; spec
+ * 2026-10-18 §6) through OAuth only — the SA pool is never consulted.
+ *
+ * - The catalog connection fetches the root. It must be a folder
+ *   (MOUNT_ROOT_NOT_FOLDER) and not trashed (MOUNT_ROOT_TRASHED).
+ * - Shared Drive (root carries a driveId): the root must be the drive root
+ *   itself — a folder inside a Shared Drive is MOUNT_ROOT_NOT_OWNED. The
+ *   write connection must resolve the same root (MOUNT_WRITER_MISMATCH).
+ * - My Drive folder (no driveId): ownedByMe for the catalog principal
+ *   (MOUNT_ROOT_NOT_OWNED), not the account root (no parents =>
+ *   MOUNT_ROOT_IS_MY_DRIVE), and the write connection must be the same
+ *   Google principal and also see an owned folder (MOUNT_WRITER_MISMATCH).
+ * - Both kinds: the write identity must report canAddChildren === true
+ *   (MOUNT_ROOT_NOT_WRITABLE) — a missing capability is not permission.
  */
 async function validateMountTargets(
   db: D1Database,
   provider: OAuthCatalogWriteProvider,
-  driveId: string,
+  rootFolderId: string,
   catalogConnectionId: string,
   writeConnectionId: string,
-): Promise<void> {
-  const catalogState = await requireUsableOAuthWriter(
-    db,
-    catalogConnectionId,
-    'catalog',
-  );
-  const writeState = await requireUsableOAuthWriter(
-    db,
-    writeConnectionId,
-    'write',
-  );
-  const drive = validateDriveId(driveId, 'admin.mounts');
-  const root = await provider.getMetadata({
-    writer: catalogState.writer,
-    ref: { id: drive },
-  });
-  if (!isSharedDriveRoot(root, drive)) {
-    throw new ApiRequestError(
-      400,
-      'VALIDATION_FAILED',
-      'The driveId does not resolve to this Shared Drive root for the catalog connection.',
-    );
+): Promise<MountTarget> {
+  const catalogState = await requireUsableOAuthWriter(db, catalogConnectionId, 'catalog');
+  const writeState = await requireUsableOAuthWriter(db, writeConnectionId, 'write');
+  const id = validateDriveId(rootFolderId, 'admin.mounts');
+  const root = await provider.getMetadata({ writer: catalogState.writer, ref: { id } });
+  if (root.mimeType !== FOLDER_MIME_TYPE) {
+    throw mountTargetError('MOUNT_ROOT_NOT_FOLDER', 'The mount root is not a folder.');
   }
-  if (writeConnectionId === catalogConnectionId) {
-    if (root.capabilities?.canAddChildren !== true) {
-      throw new ApiRequestError(
-        400,
-        'VALIDATION_FAILED',
-        'The write connection has not proven canAddChildren on this Shared Drive.',
-      );
+  if (root.trashed === true) {
+    throw mountTargetError('MOUNT_ROOT_TRASHED', 'The mount root is in the trash.');
+  }
+  const sameConnection = writeConnectionId === catalogConnectionId;
+  const writerRoot = async (): Promise<DriveFileMeta> =>
+    sameConnection ? root : provider.getMetadata({ writer: writeState.writer, ref: { id } });
+
+  if (root.driveId !== undefined) {
+    if (!isSharedDriveRoot(root, id)) {
+      throw mountTargetError('MOUNT_ROOT_NOT_OWNED', 'A Shared Drive mount must name the Shared Drive root itself.');
     }
-    return;
+    const writeRoot = await writerRoot();
+    if (!isSharedDriveRoot(writeRoot, id)) {
+      throw mountTargetError('MOUNT_WRITER_MISMATCH', 'The write connection does not resolve the same Shared Drive root.');
+    }
+    if (writeRoot.capabilities?.canAddChildren !== true) {
+      throw mountTargetError('MOUNT_ROOT_NOT_WRITABLE', 'The write connection has not proven canAddChildren on this Shared Drive.');
+    }
+    return { kind: 'shared_drive', rootFolderId: id, driveId: id };
   }
-  const writeRoot = await provider.getMetadata({
-    writer: writeState.writer,
-    ref: { id: drive },
-  });
-  if (!isSharedDriveRoot(writeRoot, drive)) {
-    throw new ApiRequestError(
-      400,
-      'VALIDATION_FAILED',
-      'The write connection does not resolve the same Shared Drive root.',
-    );
+
+  if (root.ownedByMe !== true) {
+    throw mountTargetError('MOUNT_ROOT_NOT_OWNED', 'The folder is not owned by the catalog connection account.');
+  }
+  if (root.parents === undefined || root.parents.length === 0) {
+    throw mountTargetError('MOUNT_ROOT_IS_MY_DRIVE', 'The My Drive root itself cannot be mounted; choose a folder inside it.');
+  }
+  if (root.id !== id) {
+    throw new ApiRequestError(400, 'VALIDATION_FAILED', 'The folder id did not resolve to the same folder.');
+  }
+  if (writeState.writer.principalId !== catalogState.writer.principalId) {
+    throw mountTargetError('MOUNT_WRITER_MISMATCH', 'A My Drive mount needs catalog and write connections of the same Google account.');
+  }
+  const writeRoot = await writerRoot();
+  if (!isSameOwnedMyDriveFolder(writeRoot, id)) {
+    throw mountTargetError('MOUNT_WRITER_MISMATCH', 'The write connection does not see the same owned folder.');
   }
   if (writeRoot.capabilities?.canAddChildren !== true) {
-    throw new ApiRequestError(
-      400,
-      'VALIDATION_FAILED',
-      'The write connection has not proven canAddChildren on this Shared Drive.',
-    );
+    throw mountTargetError('MOUNT_ROOT_NOT_WRITABLE', 'The write connection has not proven canAddChildren on this folder.');
   }
+  return { kind: 'my_drive_folder', rootFolderId: id, driveId: null };
 }
 
 /**
@@ -873,8 +912,9 @@ export function createAdminRouter(deps: AdminRouterDeps = {}) {
     }
   });
 
-  // POST /mounts — create a mount over a full Shared Drive: separate
-  // catalog/write connections + optional initial SA read pool.
+  // POST /mounts — create a mount over a Shared Drive or an owned My Drive
+  // folder (kind decided by validateMountTargets): separate catalog/write
+  // connections + optional initial SA read pool.
   app.post('/mounts', async (c) => {
     const auth = await adminOrResponse(c, requireAdmin);
     if ('response' in auth) return auth.response;
@@ -883,10 +923,10 @@ export function createAdminRouter(deps: AdminRouterDeps = {}) {
     const input = parsed.data;
 
     try {
-      await validateMountTargets(
+      const target = await validateMountTargets(
         c.env.DB,
         oauthProviderFor(c.env),
-        input.driveId,
+        input.rootFolderId,
         input.catalogConnectionId,
         input.writeConnectionId,
       );
@@ -898,13 +938,14 @@ export function createAdminRouter(deps: AdminRouterDeps = {}) {
         c.env.DB
           .prepare(
             'INSERT INTO mounts ' +
-              '(id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) ' +
-              'VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?, ?)',
+              '(id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) ' +
+              'VALUES (?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?)',
           )
           .bind(
             mountId,
             input.label,
-            input.driveId,
+            target.driveId,
+            target.rootFolderId,
             input.catalogConnectionId,
             input.writeConnectionId,
             input.visibility,
@@ -975,13 +1016,18 @@ export function createAdminRouter(deps: AdminRouterDeps = {}) {
         catalogConnectionId !== mount.catalogConnectionId ||
         writeConnectionId !== mount.writeConnectionId
       ) {
-        await validateMountTargets(
+        const target = await validateMountTargets(
           c.env.DB,
           oauthProviderFor(c.env),
-          mount.driveId,
+          mount.rootFolderId,
           catalogConnectionId,
           writeConnectionId,
         );
+        // Root and kind are immutable: the new connections must prove the
+        // same mount, never re-classify it.
+        if (target.kind !== mountKindOf(mountScopeOf(mount))) {
+          throw new ApiRequestError(400, 'MOUNT_WRITER_MISMATCH', 'The new connections do not resolve the same mount kind.');
+        }
       }
       const policyChanged =
         visibility !== mount.visibility ||

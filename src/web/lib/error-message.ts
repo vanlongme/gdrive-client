@@ -86,6 +86,20 @@ export function messageKeyForError(error: unknown): {
       return { key: "errors.internal", ...base };
     case "UNEXPECTED_RESPONSE":
       return { key: "errors.unexpectedResponse", ...base };
+    case "MOUNT_ROOT_NOT_FOLDER":
+      return { key: "errors.mountRootNotFolder", ...base };
+    case "MOUNT_ROOT_NOT_OWNED":
+      return { key: "errors.mountRootNotOwned", ...base };
+    case "MOUNT_ROOT_IS_MY_DRIVE":
+      return { key: "errors.mountRootIsMyDrive", ...base };
+    case "MOUNT_ROOT_TRASHED":
+      return { key: "errors.mountRootTrashed", ...base };
+    case "MOUNT_ROOT_NOT_WRITABLE":
+      return { key: "errors.mountRootNotWritable", ...base };
+    case "MOUNT_WRITER_MISMATCH":
+      return { key: "errors.mountWriterMismatch", ...base };
+    case "MOUNT_KIND_UNSUPPORTED":
+      return { key: "errors.mountKindUnsupported", ...base };
     default:
       return { key: "errors.unknown", ...base };
   }

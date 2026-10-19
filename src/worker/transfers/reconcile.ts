@@ -6,12 +6,13 @@
  * a lookup 404 is never treated as "file absent" until the pinned writer's
  * Drive access is re-proven — missing permission is blocked, not absence
  * (R8), and a renewal destination is only writable when the parent is a
- * proven folder on the pinned Drive with canAddChildren (R9).
+ * proven folder inside the pinned mount with canAddChildren (R9).
  */
 
 import { isDriveError } from '../drive/errors';
 import type { OAuthCatalogWriteProvider } from '../drive/types';
 import { FOLDER_MIME_TYPE } from '../drive/providers/common';
+import { assertInMount, oauthParentLookup, ResourceScopeError, type MountScope } from '../drive/containment';
 import {
   decimalBytesFromBigInt,
   decimalBytesToBigInt,
@@ -73,17 +74,16 @@ export type DestinationProof =
   | { readonly ok: false; readonly retry: true; readonly reason: string };
 
 /**
- * Prove the pinned writer may create under `parentId` on the pinned Drive:
- * the parent must exist, be a folder, sit on the exact pinned driveId, not
- * be trashed, and expose canAddChildren. Missing evidence is unproven —
- * never silently accepted (R9: the writer must never create a file outside
- * the mount it was pinned to).
+ * Prove the pinned writer may create under `parentId` inside the pinned
+ * mount: the parent must exist, be a folder, not be trashed, be contained
+ * in the mount (containment.ts, lookups through the pinned writer) and
+ * expose canAddChildren. Missing evidence is unproven (R9).
  */
 export async function proveWritableDestination(args: {
   provider: OAuthCatalogWriteProvider;
   writer: Parameters<OAuthCatalogWriteProvider['getMetadata']>[0]['writer'];
   parentId: string;
-  driveId: string;
+  mountScope: MountScope;
   signal?: AbortSignal;
 }): Promise<DestinationProof> {
   try {
@@ -98,11 +98,21 @@ export async function proveWritableDestination(args: {
     if (parent.mimeType !== FOLDER_MIME_TYPE) {
       return { ok: false, reason: 'destination parent is not a folder' };
     }
-    if (parent.driveId === undefined || parent.driveId !== args.driveId) {
-      return {
-        ok: false,
-        reason: 'destination parent is outside the pinned drive',
-      };
+    try {
+      await assertInMount(
+        args.mountScope,
+        parent,
+        oauthParentLookup({
+          provider: args.provider,
+          writer: args.writer,
+          ...(args.signal === undefined ? {} : { signal: args.signal }),
+        }),
+      );
+    } catch (err) {
+      if (err instanceof ResourceScopeError) {
+        return { ok: false, reason: 'destination parent is outside the pinned drive' };
+      }
+      throw err;
     }
     if (parent.capabilities?.canAddChildren !== true) {
       return {
@@ -129,40 +139,47 @@ export async function proveWritableDestination(args: {
 }
 
 /**
- * Prove the pinned writer still has write-class access to the pinned Drive
- * root: the returned identity must be the pinned drive, not trashed, and
- * canAddChildren must hold. A readable-but-nonwriter root means a file 404
- * cannot be trusted as "absent" (R8).
+ * Prove the pinned writer still has write-class access to the pinned mount
+ * root (Shared Drive root, or an owned, non-trashed My Drive folder outside
+ * any Shared Drive) with canAddChildren. A readable-but-nonwriter root means
+ * a file 404 cannot be trusted as "absent" (R8).
  */
 export async function proveDriveAccess(args: {
   provider: OAuthCatalogWriteProvider;
   writer: Parameters<OAuthCatalogWriteProvider['getMetadata']>[0]['writer'];
-  driveId: string;
+  mountScope: MountScope;
   signal?: AbortSignal;
 }): Promise<DestinationProof> {
+  const scope = args.mountScope;
   try {
-    const drive = await args.provider.getMetadata({
+    const root = await args.provider.getMetadata({
       writer: args.writer,
-      ref: { id: args.driveId },
+      ref: { id: scope.rootFolderId },
       ...(args.signal === undefined ? {} : { signal: args.signal }),
     });
-    if (drive.trashed === true) {
+    if (scope.driveId === null) {
+      if (root.trashed === true) {
+        return { ok: false, reason: 'pinned root folder is trashed' };
+      }
+      if (root.id !== scope.rootFolderId || root.driveId !== undefined || root.mimeType !== FOLDER_MIME_TYPE) {
+        return { ok: false, reason: 'root folder identity mismatch' };
+      }
+      if (root.ownedByMe !== true) {
+        return { ok: false, reason: 'pinned root folder is not owned by the writer' };
+      }
+      if (root.capabilities?.canAddChildren !== true) {
+        return { ok: false, reason: 'writer lacks add-children on the pinned root folder' };
+      }
+      return { ok: true };
+    }
+    if (root.trashed === true) {
       return { ok: false, reason: 'pinned drive is trashed' };
     }
-    if (drive.id !== args.driveId) {
+    if (root.id !== scope.driveId || (root.driveId !== undefined && root.driveId !== scope.driveId)) {
       return { ok: false, reason: 'drive identity mismatch' };
     }
-    if (
-      drive.driveId !== undefined &&
-      drive.driveId !== args.driveId
-    ) {
-      return { ok: false, reason: 'drive identity mismatch' };
-    }
-    if (drive.capabilities?.canAddChildren !== true) {
-      return {
-        ok: false,
-        reason: 'writer lacks add-children on the pinned drive',
-      };
+    if (root.capabilities?.canAddChildren !== true) {
+      return { ok: false, reason: 'writer lacks add-children on the pinned drive' };
     }
     return { ok: true };
   } catch (err) {
@@ -222,7 +239,7 @@ export async function runLookup(args: {
   const drive = await proveDriveAccess({
     provider: args.provider,
     writer: directive.writer,
-    driveId: directive.driveId,
+    mountScope: directive.mountScope,
     ...(args.signal === undefined ? {} : { signal: args.signal }),
   });
   if (!drive.ok) {
@@ -236,7 +253,7 @@ export async function runLookup(args: {
       provider: args.provider,
       writer: directive.writer,
       parentId: args.parentId,
-      driveId: directive.driveId,
+      mountScope: directive.mountScope,
       ...(args.signal === undefined ? {} : { signal: args.signal }),
     });
     if (!parent.ok) {
@@ -266,7 +283,7 @@ export async function runRenew(args: {
     provider: args.provider,
     writer: directive.writer,
     parentId: directive.upload.parentId,
-    driveId: directive.driveId,
+    mountScope: directive.mountScope,
     ...(args.signal === undefined ? {} : { signal: args.signal }),
   });
   if (!dest.ok) {
@@ -317,7 +334,7 @@ export async function runRenew(args: {
           generation: directive.generation,
           writer: directive.writer,
           fileId: directive.generatedFileId,
-          driveId: directive.driveId,
+          mountScope: directive.mountScope,
         },
         parentId: directive.upload.parentId,
         requireParentScope: false,

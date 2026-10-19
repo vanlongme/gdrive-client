@@ -20,6 +20,9 @@ export default defineConfig(async () => {
             SETUP_TOKEN: TEST_SETUP_TOKEN,
             TEST_MIGRATIONS: JSON.stringify(testMigrations),
           },
+          // Scratch D1 for tests/integration/migration-0007.test.ts, which
+          // must stop at 0006, seed, then apply 0007 (Review Focus #5).
+          d1Databases: { MIGRATION_DB: "migration-test-db" },
           assets: {
             directory: "./tests/integration/assets",
             binding: "ASSETS",

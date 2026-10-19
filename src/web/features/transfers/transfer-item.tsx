@@ -96,7 +96,9 @@ export function TransferItem({ item }: { item: TransferItemView }) {
         <p className="transfer-error" role="alert">
           {item.error.code === "RESELECT_MISMATCH"
             ? t("transfers.reselectMismatch")
-            : item.error.message}
+            : item.blockReason === "upload:quota_exceeded"
+              ? t("errors.uploadQuotaExceeded")
+              : item.error.message}
           {item.error.requestId !== undefined
             ? ` (${t("common.requestId")}: ${item.error.requestId})`
             : ""}

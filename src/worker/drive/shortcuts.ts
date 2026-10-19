@@ -1,18 +1,25 @@
 /**
  * Resource scope resolution (spec §5.1, §7.1, §9; wave-3 worker A).
  *
- * Every file/folder id an actor presents must be proven inside the mount's
- * Shared Drive before it can drive a catalog or content operation — names
- * never identify resources, and a Drive id that merely exists is not enough.
+ * Every file/folder id an actor presents must be proven inside the mount
+ * before it can drive a catalog or content operation — names never
+ * identify resources, and a Drive id that merely exists is not enough.
  * resolveResource walks shortcut chains (bounded) through the OAuth catalog
- * identity and re-verifies `driveId === mount.driveId` at every hop, so a
- * shortcut can never smuggle an out-of-mount target into an authorized
+ * identity and re-proves containment (containment.ts assertInMount: the
+ * Shared Drive driveId rule or the My Drive ancestor walk) at every hop, so
+ * a shortcut can never smuggle an out-of-mount target into an authorized
  * request.
  */
 
 import { SHORTCUT_MIME_TYPE } from './providers/common';
 import type { MountAccess } from '../auth/grants';
 import type { MountRecord } from './mounts';
+import {
+  assertInMount,
+  mountScopeOf,
+  oauthParentLookup,
+  ResourceScopeError,
+} from './containment';
 import type {
   DriveFileMeta,
   DriveResourceRef,
@@ -20,25 +27,8 @@ import type {
   ResolvedWriter,
 } from './types';
 
-/** Why a resource was refused scope into a mount operation. */
-export type ResourceScopeReason =
-  /** driveId absent or different from the mount's Shared Drive. */
-  | 'outside-mount'
-  /** The resource is trashed upstream. */
-  | 'trashed'
-  /** Shortcut chain exceeded the bound or revisited a node. */
-  | 'shortcut-cycle'
-  /** A shortcut whose target could not be determined/loaded. */
-  | 'shortcut-unresolvable';
-
-export class ResourceScopeError extends Error {
-  readonly reason: ResourceScopeReason;
-  constructor(reason: ResourceScopeReason, message: string) {
-    super(message);
-    this.name = 'ResourceScopeError';
-    this.reason = reason;
-  }
-}
+// Moved to containment.ts (wave 7); re-exported for existing importers.
+export { ResourceScopeError, type ResourceScopeReason } from './containment';
 
 export interface ResolveResourceContext {
   /** Caller mount access — retained for scoped actors (T06 narrows it). */
@@ -58,18 +48,6 @@ export interface ResolvedResource {
 
 const MAX_SHORTCUT_DEPTH = 4;
 
-function assertInMount(meta: DriveFileMeta, mount: MountRecord): void {
-  if (meta.trashed === true) {
-    throw new ResourceScopeError('trashed', 'resource is trashed');
-  }
-  if (meta.driveId !== mount.driveId) {
-    throw new ResourceScopeError(
-      'outside-mount',
-      'resource is outside the mount drive',
-    );
-  }
-}
-
 /**
  * Resolve `ref` to a concrete Drive resource inside `mount`, following
  * shortcuts. Throws DriveError for upstream failures and ResourceScopeError
@@ -78,14 +56,20 @@ function assertInMount(meta: DriveFileMeta, mount: MountRecord): void {
  *
  * Shortcut handling: targets are resolved hop-by-hop with the catalog writer
  * (never the SA provider — catalog identity decides catalog scope) and every
- * hop must remain inside mount.driveId. A shortcut targeting outside the
- * drive, a cycle, or a depth beyond MAX_SHORTCUT_DEPTH fails closed.
+ * hop must remain inside the mount. A shortcut targeting outside the
+ * mount, a cycle, or a depth beyond MAX_SHORTCUT_DEPTH fails closed.
  */
 export async function resolveResource(
   ctx: ResolveResourceContext,
   ref: DriveResourceRef,
 ): Promise<ResolvedResource> {
   const visited = new Set<string>();
+  const scope = mountScopeOf(ctx.mount);
+  const lookup = oauthParentLookup({
+    provider: ctx.provider,
+    writer: ctx.writer,
+    ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
+  });
   let current: DriveResourceRef = ref;
   for (let depth = 0; depth <= MAX_SHORTCUT_DEPTH; depth++) {
     const meta = await ctx.provider.getMetadata({
@@ -93,7 +77,7 @@ export async function resolveResource(
       ref: current,
       ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
     });
-    assertInMount(meta, ctx.mount);
+    await assertInMount(scope, meta, lookup);
     if (visited.has(meta.id)) {
       throw new ResourceScopeError(
         'shortcut-cycle',

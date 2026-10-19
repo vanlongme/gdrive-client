@@ -153,6 +153,8 @@ export interface TransferItemView {
   /** Last canonical server state, when known. */
   serverState: UploadView["state"] | null;
   readerAccessState: ReaderAccessState | null;
+  /** Stable server block reason, e.g. upload:quota_exceeded. */
+  blockReason?: string;
   error: TransferError | null;
   /** Whether the manager still holds a readable source for this item. */
   hasFile: boolean;
@@ -235,6 +237,7 @@ interface Item {
   state: TransferState;
   serverState: UploadView["state"] | null;
   readerAccessState: ReaderAccessState | null;
+  blockReason: string | null;
   confirmed: bigint;
   sent: bigint;
   prepared: bigint;
@@ -363,6 +366,9 @@ export function createUploadManager(ports: UploadManagerPorts): UploadManager {
       state: item.state,
       serverState: item.serverState,
       readerAccessState: item.readerAccessState,
+      ...(item.blockReason === null
+        ? {}
+        : { blockReason: item.blockReason }),
       error: item.error,
       hasFile: item.file !== null,
       hasStoredHandle: item.fileHandle != null,
@@ -404,6 +410,7 @@ export function createUploadManager(ports: UploadManagerPorts): UploadManager {
     item.uploadId = view.uploadId;
     item.serverState = view.state;
     item.readerAccessState = view.readerAccessState;
+    item.blockReason = view.blockReason ?? null;
     item.chunkSize = view.chunkSize;
     item.sessionGeneration = view.sessionGeneration;
     const confirmed = BigInt(view.confirmedOffset);
@@ -829,6 +836,7 @@ export function createUploadManager(ports: UploadManagerPorts): UploadManager {
         state: "queued",
         serverState: null,
         readerAccessState: null,
+        blockReason: null,
         confirmed: 0n,
         sent: 0n,
         prepared: 0n,
@@ -954,6 +962,7 @@ export function createUploadManager(ports: UploadManagerPorts): UploadManager {
       state,
       serverState: null,
       readerAccessState: null,
+      blockReason: null,
       confirmed: BigInt(record.confirmedOffset),
       sent: BigInt(record.confirmedOffset),
       prepared: 0n,

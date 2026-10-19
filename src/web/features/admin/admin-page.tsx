@@ -47,9 +47,13 @@ export function AdminPage() {
   );
 
   // The onboarding Shared Drive chooser hands the picked drive to the mount
-  // create form; the mount backend still validates it on submit.
+  // create form; My Drive folders are picked inside the form itself.
   const pickDrive = (drive: SharedDriveEntry) => {
-    setMountPrefill({ driveId: drive.id, name: drive.name });
+    setMountPrefill({
+      kind: "shared_drive",
+      rootFolderId: drive.id,
+      name: drive.name,
+    });
     setSection("mounts");
   };
 

@@ -24,7 +24,9 @@ dependency (`wrangler 4.147.0`); invoke it as `npx wrangler`.
 
 Migrations (apply in order): `0001_initial.sql`, `0002_auth_setup.sql`,
 `0003_oauth_transactions.sql`, `0004_account_credential_uniq.sql`,
-`0005_upload_projection_version.sql`, `0006_maintenance.sql`.
+`0005_upload_projection_version.sql`, `0006_maintenance.sql`,
+`0007_my_drive_mounts.sql` (not expand-only — see the note under
+"Expand → migrate → contract" below).
 
 ## Local development
 
@@ -152,7 +154,7 @@ Staging also needs:
   different key cannot decrypt production envelopes anyway),
 - a separate OAuth Web client whose redirect URI is the **staging**
   `canonicalOrigin` + `/api/v1/admin/google/oauth/callback`,
-- its own Shared Drive test fixture and service accounts.
+- its own Shared Drive or My Drive test folder and its own service accounts.
 - Forks/CI must never receive production secrets (plan G5).
 
 Operator flow (all external/remote steps requiring authorization), same
@@ -185,6 +187,28 @@ Schema changes follow the forward-only migration sequence:
 3. **Contract** — only after every environment runs the new code, a later
    migration may tighten constraints or drop obsolete columns. Do not
    contract and expand in one release: rollback must keep working.
+
+### Migration 0007 (My Drive folder mounts) is not expand-only
+
+`migrations/0007_my_drive_mounts.sql` rebuilds the `mounts` table (`drive_id`
+becomes nullable, `root_folder_id` is added and backfilled from `drive_id`)
+and adds `mount_drive_permissions`. SQLite cannot relax `NOT NULL` in place,
+so unlike the earlier expand-only migrations it replaces a table that seven
+other tables reference. Before applying it to a populated database:
+
+1. Take a read-only export: `node scripts/backup.ts --remote --yes` (external
+   step; keep it apart from `APP_MASTER_KEY`).
+2. Apply it locally to a copy first and confirm existing Shared Drive mounts
+   still list, browse and upload (`npm test` runs the migration test with
+   every child table populated and asserts `PRAGMA foreign_key_check` is
+   empty).
+3. Apply remotely with `npm run db:migrations:remote` (external/remote step
+   requiring authorization), then deploy the matching build.
+
+Rollback caveat: the previous build neither fills `root_folder_id` on insert
+nor understands `drive_id IS NULL`, so after 0007 a code-only rollback is only
+safe if no My Drive folder mount exists and nothing inserts mounts; otherwise
+restore the pre-migration dump first (see below).
 
 ## Backup / restore / rollback
 

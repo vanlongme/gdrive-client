@@ -14,6 +14,9 @@ import {
   createCatalogRouter,
 } from '../../src/worker/drive/catalog';
 import { DriveError } from '../../src/worker/drive/errors';
+import {
+  resetContainmentCacheForTests,
+} from '../../src/worker/drive/containment';
 import type { Actor } from '../../src/worker/auth/grants';
 import type {
   CatalogEntry,
@@ -116,7 +119,7 @@ class FakeOAuthProvider implements OAuthCatalogWriteProvider {
 
   async listChildren(input: ListChildrenInput): Promise<CatalogPage> {
     this.childrenCalls.push(input);
-    const key = `${input.driveId}|${input.parentFolderId}|${input.pageToken ?? ''}`;
+    const key = `${input.scope.rootFolderId}|${input.parentFolderId}|${input.pageToken ?? ''}`;
     const page = this.children.get(key);
     if (page === undefined) {
       throw new DriveError('unexpected-response', `no fixture children for ${key}`);
@@ -126,7 +129,7 @@ class FakeOAuthProvider implements OAuthCatalogWriteProvider {
 
   async search(input: SearchFilesInput): Promise<CatalogPage> {
     this.searchCalls.push(input);
-    const key = `${input.driveId}|${input.query}|${input.folderId ?? ''}|${input.pageToken ?? ''}`;
+    const key = `${input.scope.rootFolderId}|${input.query}|${input.folderId ?? ''}|${input.pageToken ?? ''}`;
     const page = this.searches.get(key);
     if (page === undefined) {
       throw new DriveError('unexpected-response', `no fixture search for ${key}`);
@@ -267,12 +270,13 @@ async function seedMount(
   } = {},
 ) {
   await env.DB.prepare(
-    'INSERT INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) ' +
-      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)',
+    'INSERT INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)',
   )
     .bind(
       id,
       options.label ?? `Mount ${id}`,
+      options.driveId ?? DRIVE_A,
       options.driveId ?? DRIVE_A,
       options.catalog ?? 'conn-1',
       options.write ?? 'conn-1',
@@ -324,6 +328,7 @@ async function seedReadiness(
 async function resetState() {
   // Dependents first — FK references run child → parent.
   for (const table of [
+    'mount_drive_permissions',
     'mount_grants',
     'mount_read_credentials',
     'file_readiness',
@@ -353,6 +358,7 @@ async function resetState() {
 
 beforeEach(async () => {
   await applyD1Migrations(env.DB, TEST_MIGRATIONS);
+  resetContainmentCacheForTests();
   await resetState();
   currentActor = userActor();
   await seedAdminUser();
@@ -462,7 +468,11 @@ describe('GET /:m/folders/:f/children', () => {
     // No resourceKey/connection identity anywhere in the body.
     expect(JSON.stringify(page)).not.toContain('rk-target');
     expect(JSON.stringify(page)).not.toContain('conn-1');
-    expect(oauth.childrenCalls[0]!.driveId).toBe(DRIVE_A);
+    expect(oauth.childrenCalls[0]!.scope).toEqual({
+      mountId: 'm-a',
+      rootFolderId: DRIVE_A,
+      driveId: DRIVE_A,
+    });
     expect(oauth.childrenCalls[0]!.writer.connectionId).toBe('conn-1');
   });
 
@@ -745,7 +755,7 @@ describe('GET /:m/search', () => {
     expect(page.entries[0]!.id).toBe('f-9');
     expect(page.scope).toBe('drive');
     expect(oauth.searchCalls[0]!.query).toBe('budget');
-    expect(oauth.searchCalls[0]!.scope).toBe('drive');
+    expect(oauth.searchCalls[0]!.searchScope).toBe('drive');
   });
 
   it('requires folderId for folder scope and rejects it for drive scope', async () => {
@@ -922,6 +932,7 @@ describe('requireMountAccess / resolveResource scope', () => {
           id: 'm-a',
           label: 'm',
           driveId: DRIVE_A,
+          rootFolderId: DRIVE_A,
           catalogConnectionId: 'conn-1',
           writeConnectionId: 'conn-1',
           readPoolVersion: 1,
@@ -954,6 +965,7 @@ describe('requireMountAccess / resolveResource scope', () => {
             id: 'm-a',
             label: 'm',
             driveId: DRIVE_A,
+            rootFolderId: DRIVE_A,
             catalogConnectionId: 'conn-1',
             writeConnectionId: 'conn-1',
             readPoolVersion: 1,
@@ -1090,5 +1102,444 @@ describe('reviewer fixes', () => {
     );
     // The stale page token was never replayed against the new parent.
     expect(oauth.childrenCalls).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// My Drive folder mounts (wave 7): containment replaces driveId equality.
+// Fixture tree under MY_ROOT:
+//   MY_ROOT/dirA/dirB/fileB                 (inside)
+//   MY_ROOT/rootFile                        (inside, direct child)
+//   elsewhereRoot/strayDir/strayFile        (outside; chain ends at a folder with no parent)
+// ---------------------------------------------------------------------------
+
+const MY_ROOT = 'MyRootFolder01';
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
+const SHORTCUT_MIME = 'application/vnd.google-apps.shortcut';
+
+/** Like meta(), but without a driveId: My Drive files carry none. */
+function myMeta(over: Partial<DriveFileMeta> & { id: string }): DriveFileMeta {
+  return {
+    name: `file-${over.id}`,
+    mimeType: 'application/octet-stream',
+    hasThumbnail: false,
+    ...over,
+  } as DriveFileMeta;
+}
+
+async function seedMyDriveMount(
+  id: string,
+  rootFolderId = MY_ROOT,
+  options: Parameters<typeof seedMount>[1] = {},
+) {
+  await seedMount(id, { ...options, driveId: rootFolderId });
+  await env.DB.prepare(
+    'UPDATE mounts SET drive_id = NULL, root_folder_id = ? WHERE id = ?',
+  )
+    .bind(rootFolderId, id)
+    .run();
+}
+
+function seedMyTree(oauth: FakeOAuthProvider) {
+  oauth.metas.set('dirA', myMeta({ id: 'dirA', mimeType: FOLDER_MIME, parents: [MY_ROOT] }));
+  oauth.metas.set('dirB', myMeta({ id: 'dirB', mimeType: FOLDER_MIME, parents: ['dirA'] }));
+  oauth.metas.set('fileB', myMeta({ id: 'fileB', name: 'deep.pdf', parents: ['dirB'] }));
+  oauth.metas.set('rootFile', myMeta({ id: 'rootFile', name: 'top.pdf', parents: [MY_ROOT] }));
+  oauth.metas.set(
+    'elsewhereRoot',
+    myMeta({ id: 'elsewhereRoot', mimeType: FOLDER_MIME }),
+  );
+  oauth.metas.set(
+    'strayDir',
+    myMeta({ id: 'strayDir', mimeType: FOLDER_MIME, parents: ['elsewhereRoot'] }),
+  );
+  oauth.metas.set('strayFile', myMeta({ id: 'strayFile', parents: ['strayDir'] }));
+}
+
+describe('My Drive folder mount: catalog', () => {
+  beforeEach(async () => {
+    await seedMyDriveMount('m-my');
+    await seedGrant('user-1', 'm-my', 'viewer');
+  });
+
+  it('lists the mount root as a MountView rootFolderId', async () => {
+    const res = await api(makeApp({}), '/api/v1/mounts');
+    const body = MountListResponseSchema.parse(await res.json());
+    expect(body.mounts.find((m) => m.id === 'm-my')!.rootFolderId).toBe(MY_ROOT);
+  });
+
+  it('lists the root without any ancestor lookup and passes the My Drive scope', async () => {
+    const oauth = new FakeOAuthProvider();
+    oauth.children.set(`${MY_ROOT}|${MY_ROOT}|`, {
+      entries: [
+        entry({ id: 'c-1', name: 'a.pdf' }),
+        entry({ id: 'c-2', name: 'sub', kind: 'folder', mimeType: FOLDER_MIME, size: '0' }),
+      ],
+    });
+    const res = await api(
+      makeApp({ oauth }),
+      `/api/v1/mounts/m-my/folders/${MY_ROOT}/children`,
+    );
+    expect(res.status).toBe(200);
+    const page = FileChildrenPageSchema.parse(await res.json());
+    expect(page.entries.map((e) => e.id)).toEqual(['c-1', 'c-2']);
+    expect(oauth.childrenCalls[0]!.scope).toEqual({
+      mountId: 'm-my',
+      rootFolderId: MY_ROOT,
+      driveId: null,
+    });
+    expect(oauth.childrenCalls[0]!.parentFolderId).toBe(MY_ROOT);
+    expect(oauth.metadataCalls).toHaveLength(0);
+  });
+
+  it('lists a nested folder after proving only the parent, never each child', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    // The children have NO metadata fixture: any per-child lookup would 404
+    // in the fake and (being treated as "outside") would drop the entry or
+    // fail the request.
+    oauth.children.set(`${MY_ROOT}|dirB|`, {
+      entries: [entry({ id: 'kid-1' }), entry({ id: 'kid-2' })],
+    });
+    const res = await api(
+      makeApp({ oauth }),
+      '/api/v1/mounts/m-my/folders/dirB/children',
+    );
+    expect(res.status).toBe(200);
+    const page = FileChildrenPageSchema.parse(await res.json());
+    expect(page.entries.map((e) => e.id)).toEqual(['kid-1', 'kid-2']);
+    const looked = oauth.metadataCalls.map((c) => c.ref.id);
+    expect(looked).toContain('dirB');
+    expect(looked).not.toContain('kid-1');
+    expect(looked).not.toContain('kid-2');
+    expect(oauth.childrenCalls[0]!.parentFolderId).toBe('dirB');
+  });
+
+  it('answers 404 FILE_NOT_ACCESSIBLE for a folder outside the tree and never lists it', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    const res = await api(
+      makeApp({ oauth }),
+      '/api/v1/mounts/m-my/folders/strayDir/children',
+    );
+    expect(res.status).toBe(404);
+    expect(ApiErrorBodySchema.parse(await res.json()).error.code).toBe(
+      'FILE_NOT_ACCESSIBLE',
+    );
+    expect(oauth.childrenCalls).toHaveLength(0);
+  });
+
+  it('returns file detail for a file inside the tree', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    const res = await api(makeApp({ oauth }), '/api/v1/mounts/m-my/files/fileB');
+    expect(res.status).toBe(200);
+    const detail = FileDetailSchema.parse(await res.json());
+    expect(detail.id).toBe('fileB');
+    expect(detail.name).toBe('deep.pdf');
+    expect(oauth.metadataCalls[0]!.writer.connectionId).toBe('conn-1');
+  });
+
+  it('returns file detail for a direct child of the root', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    const res = await api(makeApp({ oauth }), '/api/v1/mounts/m-my/files/rootFile');
+    expect(res.status).toBe(200);
+    expect(FileDetailSchema.parse(await res.json()).id).toBe('rootFile');
+  });
+
+  it('answers FILE_NOT_ACCESSIBLE for a file outside the tree', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    const res = await api(makeApp({ oauth }), '/api/v1/mounts/m-my/files/strayFile');
+    expect(res.status).toBe(404);
+    expect(ApiErrorBodySchema.parse(await res.json()).error.code).toBe(
+      'FILE_NOT_ACCESSIBLE',
+    );
+  });
+
+  it('answers FILE_NOT_ACCESSIBLE for a missing file exactly as for an outside file', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    const outside = await api(makeApp({ oauth }), '/api/v1/mounts/m-my/files/strayFile');
+    const missing = await api(makeApp({ oauth }), '/api/v1/mounts/m-my/files/NoSuchFile1');
+    expect(missing.status).toBe(outside.status);
+    const a = ApiErrorBodySchema.parse(await outside.json()).error;
+    const b = ApiErrorBodySchema.parse(await missing.json()).error;
+    expect(b.code).toBe(a.code);
+  });
+
+  it('denies a Shared Drive file (driveId set) inside a My Drive mount', async () => {
+    const oauth = new FakeOAuthProvider();
+    oauth.metas.set(
+      'sdFile',
+      myMeta({ id: 'sdFile', parents: [MY_ROOT], driveId: DRIVE_A }),
+    );
+    const res = await api(makeApp({ oauth }), '/api/v1/mounts/m-my/files/sdFile');
+    expect(res.status).toBe(404);
+    expect(ApiErrorBodySchema.parse(await res.json()).error.code).toBe(
+      'FILE_NOT_ACCESSIBLE',
+    );
+  });
+
+  it('denies a file below a trashed ancestor', async () => {
+    const oauth = new FakeOAuthProvider();
+    oauth.metas.set(
+      'dirT',
+      myMeta({ id: 'dirT', mimeType: FOLDER_MIME, parents: [MY_ROOT], trashed: true }),
+    );
+    oauth.metas.set('fileT', myMeta({ id: 'fileT', parents: ['dirT'] }));
+    const res = await api(makeApp({ oauth }), '/api/v1/mounts/m-my/files/fileT');
+    expect(res.status).toBe(404);
+  });
+
+  it('resolves a shortcut inside the tree to its in-tree target', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    oauth.metas.set(
+      'scIn',
+      myMeta({
+        id: 'scIn',
+        mimeType: SHORTCUT_MIME,
+        parents: [MY_ROOT],
+        shortcutTargetId: 'fileB',
+      }),
+    );
+    const res = await api(makeApp({ oauth }), '/api/v1/mounts/m-my/files/scIn');
+    expect(res.status).toBe(200);
+    expect(FileDetailSchema.parse(await res.json()).id).toBe('fileB');
+  });
+
+  it('denies a shortcut inside the tree that points outside it', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    oauth.metas.set(
+      'scOut',
+      myMeta({
+        id: 'scOut',
+        mimeType: SHORTCUT_MIME,
+        parents: [MY_ROOT],
+        shortcutTargetId: 'strayFile',
+      }),
+    );
+    const res = await api(makeApp({ oauth }), '/api/v1/mounts/m-my/files/scOut');
+    expect(res.status).toBe(404);
+    expect(ApiErrorBodySchema.parse(await res.json()).error.code).toBe(
+      'FILE_NOT_ACCESSIBLE',
+    );
+  });
+
+  it('fails closed (not 200) when an ancestor lookup fails upstream', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    oauth.metas.set('dirB', new DriveError('upstream-unavailable', 'boom'));
+    const res = await api(makeApp({ oauth }), '/api/v1/mounts/m-my/files/fileB');
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(JSON.stringify(await res.json())).not.toContain('boom');
+  });
+});
+
+describe('Shared Drive mount: scope shape is unchanged', () => {
+  it('passes {rootFolderId: driveId, driveId} to the provider', async () => {
+    await seedMount('m-a');
+    await seedGrant('user-1', 'm-a', 'viewer');
+    const oauth = new FakeOAuthProvider();
+    oauth.children.set(`${DRIVE_A}|${DRIVE_A}|`, { entries: [] });
+    const res = await api(
+      makeApp({ oauth }),
+      `/api/v1/mounts/m-a/folders/${DRIVE_A}/children`,
+    );
+    expect(res.status).toBe(200);
+    expect(oauth.childrenCalls[0]!.scope).toEqual({
+      mountId: 'm-a',
+      rootFolderId: DRIVE_A,
+      driveId: DRIVE_A,
+    });
+    expect(oauth.metadataCalls).toHaveLength(0);
+  });
+});
+
+const MY_ROOT_2 = 'MyRootFolder02';
+
+describe('My Drive folder mount: whole-mount search', () => {
+  beforeEach(async () => {
+    await seedMyDriveMount('m-my');
+    await seedGrant('user-1', 'm-my', 'viewer');
+  });
+
+  it('filters out-of-tree hits, searches with the My Drive scope, no partial flag', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    oauth.searches.set(`${MY_ROOT}|budget||`, {
+      entries: [
+        entry({ id: 'in-1', name: 'budget a', parents: ['dirA'] }),
+        entry({ id: 'out-1', name: 'budget b', parents: ['strayDir'] }),
+        entry({ id: 'in-2', name: 'budget c', parents: [MY_ROOT] }),
+        entry({ id: 'out-2', name: 'budget d' }), // no visible parent: cannot be proven, so denied
+      ],
+    });
+    const res = await api(makeApp({ oauth }), '/api/v1/mounts/m-my/search?q=budget&scope=drive');
+    expect(res.status).toBe(200);
+    const page = SearchPageSchema.parse(await res.json());
+    expect(page.entries.map((e) => e.id)).toEqual(['in-1', 'in-2']);
+    expect(page.scope).toBe('drive');
+    expect(page.partial).toBeUndefined();
+    expect(page.nextCursor).toBeUndefined();
+    expect(oauth.searchCalls).toHaveLength(1);
+    expect(oauth.searchCalls[0]!.scope).toEqual({ mountId: 'm-my', rootFolderId: MY_ROOT, driveId: null });
+    expect(oauth.searchCalls[0]!.searchScope).toBe('drive');
+    expect(oauth.searchCalls[0]!.pageSize).toBe(100);
+    // parents never reach the browser.
+    expect(JSON.stringify(page)).not.toContain('parents');
+  });
+
+  it('reads at most 3 Google pages, flags partial and continues from the sealed cursor', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    const out = (id: string) => entry({ id, parents: ['strayDir'] });
+    oauth.searches.set(`${MY_ROOT}|alpha||`, { entries: [out('o1'), out('o2')], nextPageToken: 'g2' });
+    oauth.searches.set(`${MY_ROOT}|alpha||g2`, { entries: [out('o3')], nextPageToken: 'g3' });
+    oauth.searches.set(`${MY_ROOT}|alpha||g3`, {
+      entries: [entry({ id: 'h1', parents: ['dirB'] })],
+      nextPageToken: 'g4',
+    });
+    oauth.searches.set(`${MY_ROOT}|alpha||g4`, {
+      entries: [entry({ id: 'h2', parents: [MY_ROOT] })],
+    });
+    const app = makeApp({ oauth });
+    const first = SearchPageSchema.parse(
+      await (await api(app, '/api/v1/mounts/m-my/search?q=alpha&scope=drive')).json(),
+    );
+    expect(oauth.searchCalls.map((c) => c.pageToken)).toEqual([undefined, 'g2', 'g3']);
+    expect(first.entries.map((e) => e.id)).toEqual(['h1']);
+    expect(first.partial).toBe(true);
+    expect(first.nextCursor).toBeTruthy();
+    // The wire cursor is sealed: it must not expose Google's token or the state JSON.
+    const sealed = first.nextCursor!.split('.')[1]!;
+    const padded = sealed.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(sealed.length / 4) * 4, '=');
+    expect(atob(padded)).not.toContain('g4');
+
+    const second = SearchPageSchema.parse(
+      await (
+        await api(
+          app,
+          `/api/v1/mounts/m-my/search?q=alpha&scope=drive&cursor=${encodeURIComponent(first.nextCursor!)}`,
+        )
+      ).json(),
+    );
+    expect(oauth.searchCalls.at(-1)!.pageToken).toBe('g4');
+    expect(second.entries.map((e) => e.id)).toEqual(['h2']);
+    expect(second.partial).toBeUndefined();
+    expect(second.nextCursor).toBeUndefined();
+  });
+
+  it('returns at most 50 hits and resumes inside the Google page without losing hits', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    const hits = Array.from({ length: 60 }, (_, i) => entry({ id: `hit-${i}`, parents: [MY_ROOT] }));
+    oauth.searches.set(`${MY_ROOT}|many||`, { entries: hits, nextPageToken: 'g2' });
+    oauth.searches.set(`${MY_ROOT}|many||g2`, { entries: [entry({ id: 'hit-60', parents: ['dirA'] })] });
+    const app = makeApp({ oauth });
+    const first = SearchPageSchema.parse(
+      await (await api(app, '/api/v1/mounts/m-my/search?q=many&scope=drive')).json(),
+    );
+    expect(first.entries).toHaveLength(50);
+    expect(first.entries.at(-1)!.id).toBe('hit-49');
+    expect(first.partial).toBe(true);
+    const second = SearchPageSchema.parse(
+      await (
+        await api(
+          app,
+          `/api/v1/mounts/m-my/search?q=many&scope=drive&cursor=${encodeURIComponent(first.nextCursor!)}`,
+        )
+      ).json(),
+    );
+    expect(second.entries.map((e) => e.id)).toEqual([
+      ...Array.from({ length: 10 }, (_, i) => `hit-${50 + i}`),
+      'hit-60',
+    ]);
+    expect(second.partial).toBeUndefined();
+    expect(oauth.searchCalls.map((c) => c.pageToken)).toEqual([undefined, undefined, 'g2']);
+  });
+
+  it('rejects a cursor minted for another mount or another query', async () => {
+    await seedMyDriveMount('m-my2', MY_ROOT_2);
+    await seedGrant('user-1', 'm-my2', 'viewer');
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    oauth.searches.set(`${MY_ROOT}|budget||`, {
+      entries: [entry({ id: 'h1', parents: [MY_ROOT] })],
+      nextPageToken: 'g2',
+    });
+    // The collector keeps reading while Google pages remain: two more empty
+    // pages reach the 3-page cap with a live continuation, minting a real
+    // sealed cursor for the cross-mount/cross-query rejection below.
+    oauth.searches.set(`${MY_ROOT}|budget||g2`, { entries: [], nextPageToken: 'g3' });
+    oauth.searches.set(`${MY_ROOT}|budget||g3`, { entries: [], nextPageToken: 'g4' });
+    const app = makeApp({ oauth });
+    const first = SearchPageSchema.parse(
+      await (await api(app, '/api/v1/mounts/m-my/search?q=budget&scope=drive')).json(),
+    );
+    const cursor = encodeURIComponent(first.nextCursor!);
+    const callsBefore = oauth.searchCalls.length;
+    const otherMount = await api(app, `/api/v1/mounts/m-my2/search?q=budget&scope=drive&cursor=${cursor}`);
+    expect(otherMount.status).toBe(400);
+    expect(ApiErrorBodySchema.parse(await otherMount.json()).error.code).toBe('VALIDATION_FAILED');
+    const otherQuery = await api(app, `/api/v1/mounts/m-my/search?q=other&scope=drive&cursor=${cursor}`);
+    expect(otherQuery.status).toBe(400);
+    expect(ApiErrorBodySchema.parse(await otherQuery.json()).error.code).toBe('VALIDATION_FAILED');
+    expect(oauth.searchCalls.length).toBe(callsBefore);
+  });
+
+  it('fails closed (not 200) when a hit ancestor lookup fails upstream', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    oauth.metas.set('dirA', new DriveError('upstream-unavailable', 'boom'));
+    oauth.searches.set(`${MY_ROOT}|x||`, { entries: [entry({ id: 'h1', parents: ['dirA'] })] });
+    const res = await api(makeApp({ oauth }), '/api/v1/mounts/m-my/search?q=x&scope=drive');
+    expect(res.status).toBeGreaterThanOrEqual(500);
+  });
+
+  it('keeps scope=folder search on the provider path without filtering or partial', async () => {
+    const oauth = new FakeOAuthProvider();
+    seedMyTree(oauth);
+    oauth.searches.set(`${MY_ROOT}|x|dirA|`, {
+      entries: [entry({ id: 'f1' })], // no parents: contained by construction in a proven folder
+      nextPageToken: 'g2',
+    });
+    const res = await api(
+      makeApp({ oauth }),
+      '/api/v1/mounts/m-my/search?q=x&scope=folder&folderId=dirA',
+    );
+    expect(res.status).toBe(200);
+    const page = SearchPageSchema.parse(await res.json());
+    expect(page.entries.map((e) => e.id)).toEqual(['f1']);
+    expect(page.nextCursor).toBeTruthy();
+    expect(page.partial).toBeUndefined();
+    expect(oauth.searchCalls[0]!.searchScope).toBe('folder');
+    expect(oauth.searchCalls[0]!.folderId).toBe('dirA');
+    expect(oauth.searchCalls[0]!.pageSize).toBeUndefined();
+  });
+});
+
+describe('Shared Drive mount: whole-drive search is unchanged', () => {
+  it('makes one provider call, no pageSize override, no partial flag', async () => {
+    await seedMount('m-a');
+    await seedGrant('user-1', 'm-a', 'viewer');
+    const oauth = new FakeOAuthProvider();
+    oauth.searches.set(`${DRIVE_A}|budget||`, {
+      entries: [entry({ id: 'f-9', name: 'budget 2026.xlsx' })],
+      nextPageToken: 'g2',
+    });
+    const res = await api(makeApp({ oauth }), '/api/v1/mounts/m-a/search?q=budget&scope=drive');
+    expect(res.status).toBe(200);
+    const page = SearchPageSchema.parse(await res.json());
+    expect(page.entries.map((e) => e.id)).toEqual(['f-9']);
+    expect(page.nextCursor).toBeTruthy();
+    expect(page.partial).toBeUndefined();
+    expect(oauth.searchCalls).toHaveLength(1);
+    expect(oauth.searchCalls[0]!.pageSize).toBeUndefined();
+    expect(oauth.searchCalls[0]!.scope.driveId).toBe(DRIVE_A);
+    expect(oauth.metadataCalls).toHaveLength(0);
   });
 });

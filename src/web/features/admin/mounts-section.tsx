@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   createGrant,
@@ -8,6 +8,7 @@ import {
   listConnections,
   listGrants,
   listServiceAccounts,
+  listSharedDrives,
   revokeGrant,
   setReadPool,
   updateMount,
@@ -23,17 +24,23 @@ import { formatDateTime } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
 import { ConfirmAction } from "../../components/confirm-action";
 import { SharedDriveChooser } from "./shared-drive-chooser";
+import { DriveFolderBrowser, type PickedFolder } from "./drive-folder-browser";
+import { ReadGrantsPanel } from "./read-grants-panel";
 
-/** A drive prefill pushed by the onboarding chooser into this form. */
+type MountKind = MountAdminView["kind"];
+
+/** A source prefill pushed by the onboarding chooser into this form. */
 export interface MountDrivePrefill {
-  driveId: string;
+  kind: MountKind;
+  rootFolderId: string;
   name: string;
 }
 
 /**
  * Mounts and per-mount grants (spec section 11.3 step 6): a mount maps one
- * Shared Drive to an OAuth catalog connection, an OAuth write connection and
- * a separate SA read pool. Grants give app users viewer/uploader roles on a
+ * Shared Drive or one My Drive folder to an OAuth catalog connection, an
+ * OAuth write connection and a separate SA read pool. Grants give app users
+ * viewer/uploader roles on a
  * mount; they never expose connection or credential internals.
  */
 
@@ -58,8 +65,8 @@ export function MountsSection({
   const [selectedMountId, setSelectedMountId] = useState<string | null>(null);
   const [editingMountId, setEditingMountId] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setMounts({ status: "loading" });
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setMounts({ status: "loading" });
     try {
       const [mountRes, connRes, saRes] = await Promise.all([
         listAdminMounts(),
@@ -75,9 +82,29 @@ export function MountsSection({
           : (mountRes.mounts[0]?.id ?? null),
       );
     } catch (error) {
-      setMounts({ status: "error", error });
+      if (!silent) setMounts({ status: "error", error });
     }
   }, []);
+
+  // Sync requests from create / read-pool save; the panel consumes the nonce.
+  const [autoSync, setAutoSync] = useState<{
+    mountId: string;
+    nonce: number;
+  } | null>(null);
+  const requestAutoSync = useCallback(
+    (mountId: string) => {
+      setSelectedMountId(mountId);
+      setAutoSync((prev) => ({ mountId, nonce: (prev?.nonce ?? 0) + 1 }));
+      void load(true);
+    },
+    [load],
+  );
+  const refreshQuietly = useCallback(() => void load(true), [load]);
+  const clearAutoSync = useCallback(() => setAutoSync(null), []);
+  const selectedMount =
+    mounts.status === "ready"
+      ? mounts.value.find((mount) => mount.id === selectedMountId)
+      : undefined;
 
   useEffect(() => {
     void load();
@@ -112,7 +139,8 @@ export function MountsSection({
                 <thead>
                   <tr>
                     <th scope="col">{t("admin.mountLabelField")}</th>
-                    <th scope="col">{t("admin.mountDriveId")}</th>
+                    <th scope="col">{t("admin.mountKind")}</th>
+                    <th scope="col">{t("admin.mountRoot")}</th>
                     <th scope="col">{t("admin.mountCatalog")}</th>
                     <th scope="col">{t("admin.mountWrite")}</th>
                     <th scope="col">{t("admin.mountReadPool")}</th>
@@ -128,10 +156,21 @@ export function MountsSection({
                   {mounts.value.map((mount) => (
                     <tr key={mount.id}>
                       <td>{mount.label}</td>
-                      <td className="detail-mono">{mount.driveId}</td>
+                      <td>
+                        <span className="badge">
+                          {mount.kind === "my_drive_folder"
+                            ? t("admin.kindMyDriveFolder")
+                            : t("admin.kindSharedDrive")}
+                        </span>
+                      </td>
+                      <td className="detail-mono">{mount.rootFolderId}</td>
                       <td>{connLabel(mount.catalogConnectionId)}</td>
                       <td>{connLabel(mount.writeConnectionId)}</td>
-                      <td>{mount.readPool.length}</td>
+                      <td>
+                        {mount.readGrants !== undefined
+                          ? `${mount.readGrants.ready}/${mount.readGrants.total}`
+                          : mount.readPool.length}
+                      </td>
                       <td>
                         <span className="badge">
                           {mount.visibility === "public_read"
@@ -174,6 +213,14 @@ export function MountsSection({
                       setEditingMountId(null);
                       void load();
                     }}
+                    onPoolSaved={() => {
+                      setEditingMountId(null);
+                      if (editing.kind === "my_drive_folder") {
+                        requestAutoSync(editing.id);
+                      } else {
+                        void load();
+                      }
+                    }}
                     onCancel={() => setEditingMountId(null)}
                   />
                 ) : null;
@@ -185,7 +232,13 @@ export function MountsSection({
             accounts={accounts}
             prefill={prefill}
             onPrefillConsumed={onPrefillConsumed}
-            onCreated={() => void load()}
+            onCreated={(mount, hasPool) => {
+              if (hasPool && mount.kind === "my_drive_folder") {
+                requestAutoSync(mount.id);
+              } else {
+                void load(true);
+              }
+            }}
           />
 
           {mounts.value.length > 0 ? (
@@ -193,6 +246,20 @@ export function MountsSection({
               mounts={mounts.value}
               mountId={selectedMountId}
               onSelectMount={setSelectedMountId}
+            />
+          ) : null}
+          {selectedMount !== undefined &&
+          selectedMount.kind === "my_drive_folder" ? (
+            <ReadGrantsPanel
+              key={selectedMount.id}
+              mount={selectedMount}
+              autoSyncNonce={
+                autoSync !== null && autoSync.mountId === selectedMount.id
+                  ? autoSync.nonce
+                  : 0
+              }
+              onAutoSyncConsumed={clearAutoSync}
+              onChanged={refreshQuietly}
             />
           ) : null}
         </>
@@ -212,11 +279,14 @@ function MountCreateForm({
   accounts: ServiceAccountView[];
   prefill?: MountDrivePrefill | null;
   onPrefillConsumed?: () => void;
-  onCreated: () => void;
+  onCreated: (mount: MountAdminView, hasPool: boolean) => void;
 }) {
   const { t } = useI18n();
   const [label, setLabel] = useState("");
-  const [driveId, setDriveId] = useState("");
+  const [kind, setKind] = useState<MountKind>("shared_drive");
+  // Once the admin clicks a tab (or a prefill picks one) the probe below never overrides it.
+  const kindChosen = useRef(false);
+  const [rootId, setRootId] = useState("");
   const [catalogId, setCatalogId] = useState("");
   const [writeId, setWriteId] = useState("");
   const [pool, setPool] = useState<ReadonlySet<string>>(new Set());
@@ -224,26 +294,60 @@ function MountCreateForm({
     "private",
   );
   const [browsing, setBrowsing] = useState(false);
-  const [pickedName, setPickedName] = useState<string | null>(null);
+  const [picked, setPicked] = useState<{ name: string | null } | null>(null);
   const [state, setState] = useState<
     "idle" | "submitting" | { error: unknown } | "done"
   >("idle");
 
-  // A drive picked in the onboarding chooser lands here as a prefill — the
+  // A source picked in the onboarding chooser lands here as a prefill — the
   // existing fields fill but the backend still validates on submit.
   useEffect(() => {
     if (prefill === null) return;
-    setDriveId(prefill.driveId);
+    kindChosen.current = true;
+    setKind(prefill.kind);
+    setRootId(prefill.rootFolderId);
     setLabel((current) => (current.trim() === "" ? prefill.name : current));
-    setPickedName(prefill.name);
+    setPicked({ name: prefill.name });
     onPrefillConsumed?.();
   }, [prefill, onPrefillConsumed]);
 
-  const pickDrive = (drive: SharedDriveEntry) => {
-    setDriveId(drive.id);
-    setLabel((current) => (current.trim() === "" ? drive.name : current));
-    setPickedName(drive.name);
+  // Default tab: a connection that lists zero Shared Drives gets the My Drive
+  // folder tab. Only a successful empty answer counts; any failure keeps the
+  // Shared Drive default (its chooser shows the localized error itself).
+  useEffect(() => {
+    if (catalogId === "" || kindChosen.current) return;
+    const controller = new AbortController();
+    void listSharedDrives(catalogId, { pageSize: 1 }, controller.signal)
+      .then((res) => {
+        if (controller.signal.aborted || kindChosen.current) return;
+        if (res.drives.length === 0) setKind("my_drive_folder");
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [catalogId]);
+
+  const selectKind = (next: MountKind) => {
+    kindChosen.current = true;
+    if (next === kind) return;
+    setKind(next);
+    setRootId("");
+    setPicked(null);
     setBrowsing(false);
+  };
+
+  const pickDrive = (drive: SharedDriveEntry) => {
+    setRootId(drive.id);
+    setLabel((current) => (current.trim() === "" ? drive.name : current));
+    setPicked({ name: drive.name });
+    setBrowsing(false);
+  };
+
+  const pickFolder = (folder: PickedFolder) => {
+    const { name } = folder;
+    setRootId(folder.id);
+    if (name !== null)
+      setLabel((current) => (current.trim() === "" ? name : current));
+    setPicked({ name });
   };
 
   const enabledConnections = connections.filter(
@@ -262,22 +366,24 @@ function MountCreateForm({
   const submit = (event: FormEvent) => {
     event.preventDefault();
     setState("submitting");
+    const hasPool = pool.size > 0;
     void createMount({
       label: label.trim(),
-      driveId: driveId.trim(),
+      rootFolderId: rootId.trim(),
       catalogConnectionId: catalogId,
       writeConnectionId: writeId,
       serviceAccountIds: [...pool],
       visibility,
     })
-      .then(() => {
+      .then(({ mount }) => {
         setState("done");
         setLabel("");
-        setDriveId("");
+        setRootId("");
+        setPicked(null);
         setCatalogId("");
         setWriteId("");
         setPool(new Set());
-        onCreated();
+        onCreated(mount, hasPool);
       })
       .catch((error: unknown) => setState({ error }));
   };
@@ -296,33 +402,81 @@ function MountCreateForm({
         />
       </div>
       <div className="field">
-        <label htmlFor="mount-drive">{t("admin.mountDriveId")}</label>
-        <input
-          id="mount-drive"
-          className="input"
-          value={driveId}
-          onChange={(event) => setDriveId(event.target.value)}
-          autoComplete="off"
-          required
-        />
-        <p className="hint">{t("admin.mountDriveHint")}</p>
-        <button
-          type="button"
-          className="btn btn-ghost btn-sm"
-          aria-expanded={browsing}
-          disabled={catalogId === ""}
-          onClick={() => setBrowsing((current) => !current)}
+        <div
+          className="mount-tabs"
+          role="tablist"
+          aria-label={t("admin.mountKindTabs")}
         >
-          {t("admin.browseDrives")}
-        </button>
-        {browsing ? (
-          <SharedDriveChooser connectionId={catalogId} onPick={pickDrive} />
-        ) : null}
-        {pickedName !== null ? (
-          <p className="alert alert-info" role="status">
-            {t("admin.drivePicked", { name: pickedName })}
-          </p>
-        ) : null}
+          {(["my_drive_folder", "shared_drive"] as const).map((option) => (
+            <button
+              key={option}
+              type="button"
+              role="tab"
+              id={`mount-tab-${option}`}
+              aria-selected={kind === option}
+              aria-controls="mount-source-panel"
+              className="btn btn-ghost btn-sm"
+              onClick={() => selectKind(option)}
+            >
+              {option === "my_drive_folder"
+                ? t("admin.mountTabMyDrive")
+                : t("admin.mountTabSharedDrive")}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div
+        id="mount-source-panel"
+        role="tabpanel"
+        aria-labelledby={`mount-tab-${kind}`}
+      >
+        {kind === "shared_drive" ? (
+          <div className="field">
+            <label htmlFor="mount-drive">{t("admin.mountDriveId")}</label>
+            <input
+              id="mount-drive"
+              className="input"
+              value={rootId}
+              onChange={(event) => setRootId(event.target.value)}
+              autoComplete="off"
+              required
+            />
+            <p className="hint">{t("admin.mountDriveHint")}</p>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              aria-expanded={browsing}
+              disabled={catalogId === ""}
+              onClick={() => setBrowsing((current) => !current)}
+            >
+              {t("admin.browseDrives")}
+            </button>
+            {browsing ? (
+              <SharedDriveChooser connectionId={catalogId} onPick={pickDrive} />
+            ) : null}
+            {picked !== null && picked.name !== null ? (
+              <p className="alert alert-info" role="status">
+                {t("admin.drivePicked", { name: picked.name })}
+              </p>
+            ) : null}
+          </div>
+        ) : (
+          <div className="field">
+            <DriveFolderBrowser
+              key={catalogId}
+              connectionId={catalogId}
+              onPick={pickFolder}
+            />
+            {picked !== null ? (
+              <p className="alert alert-info" role="status">
+                {picked.name !== null
+                  ? t("admin.folderPicked", { name: picked.name })
+                  : t("admin.folderPickedLink", { id: rootId })}
+              </p>
+            ) : null}
+            <p className="hint">{t("admin.mountFolderHint")}</p>
+          </div>
+        )}
       </div>
       <div className="field">
         <label htmlFor="mount-catalog-conn">{t("admin.mountCatalog")}</label>
@@ -397,7 +551,7 @@ function MountCreateForm({
         disabled={
           state === "submitting" ||
           label.trim() === "" ||
-          driveId.trim() === "" ||
+          rootId.trim() === "" ||
           catalogId === "" ||
           writeId === ""
         }
@@ -615,12 +769,14 @@ function MountEditForm({
   connections,
   accounts,
   onSaved,
+  onPoolSaved,
   onCancel,
 }: {
   mount: MountAdminView;
   connections: ConnectionView[];
   accounts: ServiceAccountView[];
   onSaved: () => void;
+  onPoolSaved: () => void;
   onCancel: () => void;
 }) {
   const { t } = useI18n();
@@ -667,7 +823,7 @@ function MountEditForm({
     void setReadPool(mount.id, {
       entries: [...pool].map((serviceAccountId) => ({ serviceAccountId })),
     })
-      .then(onSaved)
+      .then(onPoolSaved)
       .catch((error: unknown) => setPoolState({ error }));
   };
 

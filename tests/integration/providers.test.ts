@@ -17,6 +17,7 @@ import {
   validateDriveId,
 } from '../../src/worker/drive/transport';
 import { createCoordinatorTokenSource } from '../../src/worker/drive/coordinator-client';
+import type { MountScope } from '../../src/worker/drive/containment';
 import { createGoogleOAuthProvider } from '../../src/worker/drive/providers/google-oauth';
 import { createServiceAccountReadProvider } from '../../src/worker/drive/providers/service-account-read';
 import type {
@@ -187,6 +188,17 @@ const READER: ReadIdentity = {
   serviceAccountVersion: 4,
   email: 'sa-1@proj-1.iam.gserviceaccount.com',
   projectId: 'proj-1',
+};
+
+const SHARED_SCOPE: MountScope = {
+  mountId: 'mount-1',
+  rootFolderId: 'drive-7',
+  driveId: 'drive-7',
+};
+const MY_DRIVE_SCOPE: MountScope = {
+  mountId: 'mount-2',
+  rootFolderId: 'folder-root',
+  driveId: null,
 };
 
 function fileJson(overrides: Record<string, unknown> = {}) {
@@ -383,6 +395,65 @@ describe('destination policy', () => {
 // ---------------------------------------------------------------------------
 // Structured errors
 // ---------------------------------------------------------------------------
+
+describe('files.list corpora rules', () => {
+  const send = (query: Record<string, string | boolean | undefined>) => {
+    const { fetchImpl, requests } = stubFetch(() => jsonResponse({ files: [] }));
+    const transport = createDriveTransport('google_oauth', { fetchImpl });
+    return {
+      requests,
+      result: transport.send({
+        operation: 'oauth.files.list',
+        token: 't',
+        path: '/drive/v3/files',
+        query,
+      }),
+    };
+  };
+
+  it('accepts a Shared Drive listing and a My Drive listing', async () => {
+    const shared = send({
+      q: 'trashed = false',
+      corpora: 'drive',
+      driveId: 'drive-1',
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+    });
+    await expect(shared.result).resolves.toBeInstanceOf(Response);
+    const mine = send({ q: 'trashed = false', corpora: 'user', supportsAllDrives: true });
+    await expect(mine.result).resolves.toBeInstanceOf(Response);
+    expect(mine.requests[0]?.url.searchParams.get('corpora')).toBe('user');
+    expect(mine.requests[0]?.url.searchParams.has('driveId')).toBe(false);
+  });
+
+  it('refuses a missing or unknown corpora before fetch', async () => {
+    for (const query of [
+      { q: 'x', supportsAllDrives: true },
+      { q: 'x', corpora: 'allDrives', supportsAllDrives: true },
+      { q: 'x', corpora: 'domain', supportsAllDrives: true },
+      { q: 'x', corpora: '', supportsAllDrives: true },
+    ]) {
+      const attempt = send(query);
+      await expect(attempt.result, JSON.stringify(query)).rejects.toMatchObject({ reason: 'destination-refused' });
+      expect(attempt.requests).toHaveLength(0);
+    }
+  });
+
+  it('allows driveId and includeItemsFromAllDrives only with corpora=drive', async () => {
+    for (const extra of [
+      { driveId: 'drive-1' },
+      { includeItemsFromAllDrives: true },
+      { driveId: 'drive-1', includeItemsFromAllDrives: true },
+    ]) {
+      const attempt = send({ q: 'x', corpora: 'user', supportsAllDrives: true, ...extra });
+      await expect(attempt.result, JSON.stringify(extra)).rejects.toMatchObject({ reason: 'destination-refused' });
+      expect(attempt.requests).toHaveLength(0);
+    }
+    const noDrive = send({ q: 'x', corpora: 'drive', includeItemsFromAllDrives: true, supportsAllDrives: true });
+    await expect(noDrive.result).rejects.toMatchObject({ reason: 'destination-refused' });
+    expect(noDrive.requests).toHaveLength(0);
+  });
+});
 
 describe('error classification', () => {
   it('maps Google reason tokens into Drive failure reasons', () => {
@@ -692,7 +763,7 @@ describe('GoogleOAuthProvider', () => {
     });
     const page = await provider.listChildren({
       writer: WRITER,
-      driveId: 'drive-7',
+      scope: SHARED_SCOPE,
       parentFolderId: 'root',
       pageSize: 5000,
     });
@@ -740,14 +811,93 @@ describe('GoogleOAuthProvider', () => {
     });
     await provider.search({
       writer: WRITER,
-      driveId: 'd1',
+      scope: { ...SHARED_SCOPE, rootFolderId: 'd1', driveId: 'd1' },
       query: `it's a \\ test`,
-      scope: 'folder',
+      searchScope: 'folder',
       folderId: 'fld-1',
     });
     expect(requests[0]?.url.searchParams.get('q')).toBe(
       `name contains 'it\\'s a \\\\ test' and trashed = false and 'fld-1' in parents`,
     );
+  });
+
+  it('lists a My Drive folder with corpora=user and no Shared Drive parameters', async () => {
+    const { fetchImpl, requests } = stubFetch(() =>
+      jsonResponse({ files: [fileJson({ id: 'f1' })] }),
+    );
+    const provider = createGoogleOAuthProvider({
+      tokenSource: new FakeTokenSource(),
+      transport: createDriveTransport('google_oauth', { fetchImpl }),
+    });
+    const page = await provider.listChildren({
+      writer: WRITER,
+      scope: MY_DRIVE_SCOPE,
+      parentFolderId: 'folder-root',
+    });
+    expect(page.entries.map((e) => e.id)).toEqual(['f1']);
+    const params = requests[0]!.url.searchParams;
+    expect(params.get('q')).toBe("'folder-root' in parents and trashed = false");
+    expect(params.get('corpora')).toBe('user');
+    expect(params.get('supportsAllDrives')).toBe('true');
+    expect(params.has('driveId')).toBe(false);
+    expect(params.has('includeItemsFromAllDrives')).toBe(false);
+    expect(params.get('orderBy')).toBe('folder,name_natural');
+  });
+
+  it('searches My Drive by folder or whole corpus without leaking a driveId', async () => {
+    const { fetchImpl, requests } = stubFetch(() => jsonResponse({ files: [] }));
+    const provider = createGoogleOAuthProvider({
+      tokenSource: new FakeTokenSource(),
+      transport: createDriveTransport('google_oauth', { fetchImpl }),
+    });
+    await provider.search({
+      writer: WRITER,
+      scope: MY_DRIVE_SCOPE,
+      query: 'report',
+      searchScope: 'drive',
+      pageSize: 100,
+      pageToken: 'g-2',
+    });
+    await provider.search({
+      writer: WRITER,
+      scope: MY_DRIVE_SCOPE,
+      query: 'report',
+      searchScope: 'folder',
+      folderId: 'fld-1',
+    });
+    expect(requests[0]!.url.searchParams.get('q')).toBe(
+      "name contains 'report' and trashed = false",
+    );
+    expect(requests[0]!.url.searchParams.get('pageSize')).toBe('100');
+    expect(requests[0]!.url.searchParams.get('pageToken')).toBe('g-2');
+    expect(requests[1]!.url.searchParams.get('q')).toBe(
+      "name contains 'report' and trashed = false and 'fld-1' in parents",
+    );
+    for (const req of requests) {
+      expect(req.url.searchParams.get('corpora')).toBe('user');
+      expect(req.url.searchParams.has('driveId')).toBe(false);
+      expect(req.url.searchParams.has('includeItemsFromAllDrives')).toBe(false);
+    }
+  });
+
+  it('requests and parses ownedByMe on file metadata', async () => {
+    const { fetchImpl, requests } = stubFetch(() =>
+      jsonResponse(fileJson({ ownedByMe: true, mimeType: 'application/vnd.google-apps.folder' })),
+    );
+    const provider = createGoogleOAuthProvider({
+      tokenSource: new FakeTokenSource(),
+      transport: createDriveTransport('google_oauth', { fetchImpl }),
+    });
+    const meta = await provider.getMetadata({ writer: WRITER, ref: { id: 'folder-root' } });
+    expect(meta.ownedByMe).toBe(true);
+    expect(requests[0]!.url.searchParams.get('fields')).toContain('ownedByMe');
+    const absent = createGoogleOAuthProvider({
+      tokenSource: new FakeTokenSource(),
+      transport: createDriveTransport('google_oauth', {
+        fetchImpl: stubFetch(() => jsonResponse(fileJson())).fetchImpl,
+      }),
+    });
+    expect((await absent.getMetadata({ writer: WRITER, ref: { id: 'f' } })).ownedByMe).toBeUndefined();
   });
 
   it('rejects empty search and folder scope without folderId locally', async () => {
@@ -757,17 +907,17 @@ describe('GoogleOAuthProvider', () => {
     await expect(
       provider.search({
         writer: WRITER,
-        driveId: 'd',
+        scope: SHARED_SCOPE,
         query: '  ',
-        scope: 'drive',
+        searchScope: 'drive',
       }),
     ).rejects.toMatchObject({ reason: 'invalid-input' });
     await expect(
       provider.search({
         writer: WRITER,
-        driveId: 'd',
+        scope: SHARED_SCOPE,
         query: 'x',
-        scope: 'folder',
+        searchScope: 'folder',
       }),
     ).rejects.toMatchObject({ reason: 'invalid-input' });
   });

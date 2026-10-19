@@ -37,6 +37,8 @@ export const UploadViewSchema = z
     totalBytes: DecimalBytesSchema,
     chunkSize: z.number().int().positive(),
     readerAccessState: ReaderAccessStateSchema,
+    /** Stable blocked reason (e.g. upload:quota_exceeded); not an ApiErrorCode. */
+    blockReason: z.string().min(1).optional(),
   })
   .strict();
 export type UploadView = z.infer<typeof UploadViewSchema>;

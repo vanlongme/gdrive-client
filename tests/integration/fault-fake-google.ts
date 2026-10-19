@@ -108,7 +108,10 @@ export interface FakeFile {
   name: string;
   mimeType: string;
   parents: string[];
-  driveId: string;
+  /** Shared Drive id; absent for My Drive files (Google omits it there). */
+  driveId?: string;
+  /** My Drive owner (OAuth permissionId); drives `ownedByMe` and access. */
+  ownerPrincipal?: string;
   trashed: boolean;
   bytes: Uint8Array;
   /** content sha256/md5 computed from `bytes` like upstream would. */
@@ -122,6 +125,31 @@ export interface FakeFile {
     canTrash?: boolean;
   };
   revisions?: Map<string, Uint8Array>;
+}
+
+/** A direct user permission on a My Drive file/folder (inherited downward). */
+export interface FakePermission {
+  id: string;
+  type: 'user';
+  role: 'reader' | 'writer';
+  emailAddress: string;
+}
+
+/** One permissions.create the fake received (bodies are not otherwise kept). */
+export interface RecordedPermissionCreate {
+  fileId: string;
+  emailAddress: string;
+  type: unknown;
+  role: unknown;
+  sendNotificationEmail: string | null;
+  supportsAllDrives: string | null;
+  /** True when the call was answered with an injected failure. */
+  failed: boolean;
+}
+
+export interface RecordedPermissionDelete {
+  fileId: string;
+  permissionId: string;
 }
 
 interface UploadSessionState {
@@ -159,6 +187,17 @@ function googleError(status: number, reason: string, message = reason): Response
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder';
 
+/** `iss` claim of a JWT assertion (the SA email); a fixed name when unreadable. */
+function issuerOf(assertion: string): string {
+  try {
+    const payload = assertion.split('.')[1] ?? '';
+    const claims = JSON.parse(atob(payload.replace(/-/g, '+').replace(/_/g, '/'))) as { iss?: unknown };
+    return typeof claims.iss === 'string' && claims.iss !== '' ? claims.iss : 'unknown-sa@fake.test';
+  } catch {
+    return 'unknown-sa@fake.test';
+  }
+}
+
 export class FakeGoogle {
   readonly requests: RecordedGoogleRequest[] = [];
   readonly files = new Map<string, FakeFile>();
@@ -189,6 +228,22 @@ export class FakeGoogle {
   hook: ((req: RecordedGoogleRequest) => Response | undefined) | undefined;
   /** Delay the next resumable-session POST so callers can race other work. */
   holdNextSessionInit: Promise<void> | undefined;
+
+  // -- My Drive + permissions model ----------------------------------------
+  /** fileId -> direct permissions (descendants inherit them). */
+  readonly permissions = new Map<string, FakePermission[]>();
+  readonly permissionCreates: RecordedPermissionCreate[] = [];
+  readonly permissionDeletes: RecordedPermissionDelete[] = [];
+  /** `sharingRateLimitExceeded` on the next `remaining` permissions.create calls. */
+  sharingRateLimit: { remaining: number; retryAfterSeconds?: number } = { remaining: 0 };
+  /** Per-email permissions.create failure (e.g. 400 invalidSharingRequest). */
+  readonly permissionCreateFaults = new Map<string, { status: number; reason: string }>();
+  /** Answer upload initiation with 403 storageQuotaExceeded. */
+  uploadQuotaExceeded = false;
+  /** Bearer sat-N -> SA email, taken from the JWT assertion `iss`. */
+  private readonly saEmailByToken = new Map<string, string>();
+  private permissionSeq = 0;
+  private myDriveRootId: string | undefined;
 
   constructor(options: FakeGoogleOptions = {}) {
     this.driveId = options.driveId ?? '0AFakeDrive0001';
@@ -252,6 +307,94 @@ export class FakeGoogle {
     }
     this.files.set(id, f);
     return f;
+  }
+
+  /** The operator's My Drive root folder (created on first use). */
+  ensureMyDriveRoot(): FakeFile {
+    const existing = this.myDriveRootId === undefined ? undefined : this.files.get(this.myDriveRootId);
+    if (existing !== undefined) return existing;
+    const root: FakeFile = {
+      id: 'my-drive-root-1',
+      name: 'My Drive',
+      mimeType: FOLDER_MIME,
+      parents: [],
+      ownerPrincipal: this.permissionId,
+      trashed: false,
+      bytes: new Uint8Array(0),
+      headRevisionId: 'rev-my-drive-root-1',
+      capabilities: { canAddChildren: true, canTrash: true },
+    };
+    this.files.set(root.id, root);
+    this.myDriveRootId = root.id;
+    return root;
+  }
+
+  /** A My Drive folder owned by the operator (default parent: My Drive root). */
+  addMyDriveFolder(
+    id: string,
+    opts: { parentId?: string; name?: string; ownerPrincipal?: string } = {},
+  ): FakeFile {
+    const f: FakeFile = {
+      id,
+      name: opts.name ?? id,
+      mimeType: FOLDER_MIME,
+      parents: [opts.parentId ?? this.ensureMyDriveRoot().id],
+      ownerPrincipal: opts.ownerPrincipal ?? this.permissionId,
+      trashed: false,
+      bytes: new Uint8Array(0),
+      headRevisionId: `rev-${id}`,
+      capabilities: { canAddChildren: true, canTrash: true },
+    };
+    this.files.set(id, f);
+    return f;
+  }
+
+  /** A My Drive file owned by the operator (default parent: My Drive root). */
+  addMyDriveFile(
+    id: string,
+    bytes: Uint8Array,
+    opts: Partial<Omit<FakeFile, 'driveId'>> & { parentId?: string } = {},
+  ): FakeFile {
+    const f: FakeFile = {
+      id,
+      name: opts.name ?? id,
+      mimeType: opts.mimeType ?? 'application/octet-stream',
+      parents: [opts.parentId ?? this.ensureMyDriveRoot().id],
+      ownerPrincipal: opts.ownerPrincipal ?? this.permissionId,
+      trashed: opts.trashed ?? false,
+      bytes,
+      headRevisionId: opts.headRevisionId ?? 'rev-1',
+      capabilities: opts.capabilities ?? { canDownload: true, canTrash: true },
+      ...(opts.thumbnailLink === undefined ? {} : { thumbnailLink: opts.thumbnailLink }),
+      ...(opts.revisions === undefined ? {} : { revisions: opts.revisions }),
+    };
+    if (bytes.byteLength > 0) f.md5Checksum = md5Hex(bytes);
+    this.files.set(id, f);
+    return f;
+  }
+
+  /** Grant a direct reader/writer permission without any API call. */
+  grant(fileId: string, emailAddress: string, role: FakePermission['role'] = 'reader'): FakePermission {
+    const list = this.permissions.get(fileId) ?? [];
+    const existing = list.find((p) => p.emailAddress.toLowerCase() === emailAddress.toLowerCase());
+    if (existing !== undefined) {
+      existing.role = role;
+      return existing;
+    }
+    const created: FakePermission = {
+      id: `perm-${++this.permissionSeq}`,
+      type: 'user',
+      role,
+      emailAddress,
+    };
+    list.push(created);
+    this.permissions.set(fileId, list);
+    return created;
+  }
+
+  /** Direct permissions currently on a file (a copy). */
+  permissionsOf(fileId: string): FakePermission[] {
+    return (this.permissions.get(fileId) ?? []).map((p) => ({ ...p }));
   }
 
   /** Requests recorded so far, optionally filtered. */
@@ -371,8 +514,10 @@ export class FakeGoogle {
         if (assertion.split('.').length !== 3) {
           return googleError(400, 'invalid_grant', 'Malformed JWT.');
         }
+        const saToken = `sat-${++this.saTokenSeq}`;
+        this.saEmailByToken.set(saToken, issuerOf(assertion));
         return json({
-          access_token: `sat-${++this.saTokenSeq}`,
+          access_token: saToken,
           expires_in: 3600,
           token_type: 'Bearer',
         });
@@ -433,13 +578,26 @@ export class FakeGoogle {
       return this.routeFilesCreate(req, parsed);
     }
 
+    const permMatch = /^\/drive\/v3\/files\/([^/]+)\/permissions(?:\/([^/]+))?$/.exec(path);
+    if (permMatch !== null) {
+      return this.routePermissions(req, body, permMatch[1]!, permMatch[2]);
+    }
+
     const fileMatch = /^\/drive\/v3\/files\/([^/]+)(\/revisions\/([^/]+))?(\/export)?$/.exec(path);
     if (fileMatch !== null) {
-      const [, fileId, , revisionId, exportSuffix] = fileMatch;
+      const [, requestedId, , revisionId, exportSuffix] = fileMatch;
+      // `root` is Drive's alias for the operator's My Drive root folder.
+      const fileId = requestedId === 'root' ? this.ensureMyDriveRoot().id : requestedId;
       const denied = this.isDenied(req.provider, fileId!);
       if (denied !== null) return denied;
       const file = this.files.get(fileId!);
       if (file === undefined || (file.trashed && req.method === 'GET')) {
+        return googleError(404, 'notFound', 'File not found.');
+      }
+      if (
+        file.driveId === undefined &&
+        !this.canAccessMyDrive(req, file, req.method === 'PATCH' ? 'write' : 'read')
+      ) {
         return googleError(404, 'notFound', 'File not found.');
       }
       if (exportSuffix !== undefined && req.method === 'GET') {
@@ -464,7 +622,7 @@ export class FakeGoogle {
         return this.applyRange(req, headers, file.bytes);
       }
       if (req.method === 'GET') {
-        return json(this.fileJson(file));
+        return json(this.fileJson(file, req.provider));
       }
       if (req.method === 'PATCH') {
         const patch = body.byteLength > 0
@@ -472,7 +630,18 @@ export class FakeGoogle {
           : {};
         if (patch.trashed === true) file.trashed = true;
         if (typeof patch.name === 'string') file.name = patch.name;
-        return json(this.fileJson(file));
+        const addParents = req.url.searchParams.get('addParents');
+        const removeParents = req.url.searchParams.get('removeParents');
+        if (removeParents !== null) {
+          const drop = new Set(removeParents.split(','));
+          file.parents = file.parents.filter((p) => !drop.has(p));
+        }
+        if (addParents !== null) {
+          for (const p of addParents.split(',')) {
+            if (p !== '' && !file.parents.includes(p)) file.parents.push(p);
+          }
+        }
+        return json(this.fileJson(file, req.provider));
       }
       return googleError(405, 'httpMethodNotAllowed', `${req.method} ${path}`);
     }
@@ -489,7 +658,7 @@ export class FakeGoogle {
     return null;
   }
 
-  private fileJson(file: FakeFile): Record<string, unknown> {
+  private fileJson(file: FakeFile, provider: FakeProvider = 'google_oauth'): Record<string, unknown> {
     return {
       id: file.id,
       name: file.name,
@@ -498,6 +667,9 @@ export class FakeGoogle {
       trashed: file.trashed,
       parents: file.parents,
       driveId: file.driveId,
+      ...(file.driveId === undefined
+        ? { ownedByMe: provider === 'google_oauth' && file.ownerPrincipal === this.permissionId }
+        : {}),
       headRevisionId: file.headRevisionId,
       capabilities: file.capabilities,
       ...(file.sha256Checksum === undefined ? {} : { sha256Checksum: file.sha256Checksum }),
@@ -506,10 +678,187 @@ export class FakeGoogle {
     };
   }
 
+  /** Identity behind a bearer: the OAuth operator or the SA named in its JWT. */
+  private callerIdentity(req: RecordedGoogleRequest): { owner?: string; email: string } | null {
+    if (req.provider === 'google_oauth') {
+      return { owner: this.permissionId, email: this.operatorEmail };
+    }
+    if (req.provider === 'service_account') {
+      const token = (req.authorization ?? '').replace(/^Bearer /, '');
+      return { email: this.saEmailByToken.get(token) ?? 'unknown-sa@fake.test' };
+    }
+    return null;
+  }
+
+  /**
+   * My Drive access: the owner, OR a user permission on the file or any
+   * ancestor (inherited). 'write' needs the owner or a writer grant.
+   */
+  private canAccessMyDrive(
+    req: RecordedGoogleRequest,
+    file: FakeFile,
+    need: 'read' | 'write',
+  ): boolean {
+    const who = this.callerIdentity(req);
+    if (who === null) return false;
+    if (file.ownerPrincipal !== undefined && file.ownerPrincipal === who.owner) return true;
+    const email = who.email.toLowerCase();
+    let best: FakePermission['role'] | undefined;
+    const seen = new Set<string>();
+    let cursor: FakeFile | undefined = file;
+    while (cursor !== undefined && !seen.has(cursor.id) && seen.size < 64) {
+      seen.add(cursor.id);
+      for (const perm of this.permissions.get(cursor.id) ?? []) {
+        if (perm.emailAddress.toLowerCase() !== email) continue;
+        if (perm.role === 'writer') best = 'writer';
+        else best ??= 'reader';
+      }
+      const parentId: string | undefined = cursor.parents[0];
+      cursor = parentId === undefined ? undefined : this.files.get(parentId);
+    }
+    return need === 'read' ? best !== undefined : best === 'writer';
+  }
+
+  /** corpora=user listing over My Drive files the caller can access. */
+  private routeMyDriveList(req: RecordedGoogleRequest): Response {
+    if (req.url.searchParams.has('driveId')) {
+      return googleError(400, 'invalid', 'The driveId parameter can only be used with corpora=drive.');
+    }
+    const q = req.url.searchParams.get('q') ?? '';
+    const parentToken = /'([^']+)' in parents/.exec(q)?.[1];
+    const parentId = parentToken === 'root' ? this.ensureMyDriveRoot().id : parentToken;
+    const nameRaw = /name contains '((?:\\'|[^'])*)'/.exec(q)?.[1];
+    const nameTerm = nameRaw?.replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+    const mime = /mimeType = '([^']+)'/.exec(q)?.[1];
+    const trashed = /trashed = (true|false)/.exec(q)?.[1];
+    const onlyMine = /'me' in owners/.test(q);
+    const who = this.callerIdentity(req);
+    const matches = [...this.files.values()]
+      .filter((f) => f.driveId === undefined && f.parents.length > 0)
+      .filter((f) => this.canAccessMyDrive(req, f, 'read'))
+      .filter((f) => !onlyMine || f.ownerPrincipal === who?.owner)
+      .filter((f) => trashed === undefined || f.trashed === (trashed === 'true'))
+      .filter((f) => parentId === undefined || f.parents.includes(parentId))
+      .filter((f) => nameTerm === undefined || f.name.includes(nameTerm))
+      .filter((f) => mime === undefined || f.mimeType === mime)
+      .sort((a, b) => {
+        const af = a.mimeType === FOLDER_MIME ? 0 : 1;
+        const bf = b.mimeType === FOLDER_MIME ? 0 : 1;
+        return af !== bf ? af - bf : a.name.localeCompare(b.name, undefined, { numeric: true });
+      });
+    const pageSizeRaw = Number.parseInt(req.url.searchParams.get('pageSize') ?? '200', 10);
+    const pageSize = Number.isInteger(pageSizeRaw) && pageSizeRaw > 0 ? Math.min(pageSizeRaw, 1000) : 200;
+    const offset = Math.max(0, Number.parseInt(req.url.searchParams.get('pageToken') ?? '0', 10) || 0);
+    const next = offset + pageSize;
+    return json({
+      files: matches.slice(offset, next).map((f) => ({
+        id: f.id,
+        name: f.name,
+        mimeType: f.mimeType,
+        size: String(f.bytes.byteLength),
+        trashed: f.trashed,
+        parents: f.parents,
+        ownedByMe: f.ownerPrincipal === who?.owner,
+        modifiedTime: '2026-10-01T00:00:00.000Z',
+        ...(f.thumbnailLink === undefined ? {} : { thumbnailLink: f.thumbnailLink }),
+      })),
+      ...(next < matches.length ? { nextPageToken: String(next) } : {}),
+    });
+  }
+
+  private routePermissions(
+    req: RecordedGoogleRequest,
+    body: Uint8Array,
+    requestedId: string,
+    permissionId: string | undefined,
+  ): Response {
+    const fileId = requestedId === 'root' ? this.ensureMyDriveRoot().id : requestedId;
+    const file = this.files.get(fileId);
+    if (file === undefined || file.driveId !== undefined) {
+      return googleError(404, 'notFound', 'File not found.');
+    }
+    if (!this.canAccessMyDrive(req, file, 'read')) {
+      return googleError(404, 'notFound', 'File not found.');
+    }
+    if (!this.canAccessMyDrive(req, file, 'write')) {
+      return googleError(403, 'insufficientFilePermissions', 'Insufficient permissions.');
+    }
+    const direct = this.permissions.get(fileId) ?? [];
+
+    if (req.method === 'GET' && permissionId === undefined) {
+      const owner = file.ownerPrincipal === this.permissionId
+        ? [{ id: `owner-${file.id}`, type: 'user', role: 'owner', emailAddress: this.operatorEmail }]
+        : [];
+      const all = [...owner, ...direct.map((p) => ({ ...p }))];
+      const pageSizeRaw = Number.parseInt(req.url.searchParams.get('pageSize') ?? '100', 10);
+      const pageSize = Number.isInteger(pageSizeRaw) && pageSizeRaw > 0 ? Math.min(pageSizeRaw, 100) : 100;
+      const offset = Math.max(0, Number.parseInt(req.url.searchParams.get('pageToken') ?? '0', 10) || 0);
+      const next = offset + pageSize;
+      return json({
+        permissions: all.slice(offset, next),
+        ...(next < all.length ? { nextPageToken: String(next) } : {}),
+      });
+    }
+
+    if (req.method === 'POST' && permissionId === undefined) {
+      const parsed = body.byteLength > 0
+        ? (JSON.parse(new TextDecoder().decode(body)) as Record<string, unknown>)
+        : {};
+      const emailAddress = typeof parsed.emailAddress === 'string' ? parsed.emailAddress : '';
+      const record: RecordedPermissionCreate = {
+        fileId,
+        emailAddress,
+        type: parsed.type,
+        role: parsed.role,
+        sendNotificationEmail: req.url.searchParams.get('sendNotificationEmail'),
+        supportsAllDrives: req.url.searchParams.get('supportsAllDrives'),
+        failed: false,
+      };
+      this.permissionCreates.push(record);
+      // The app must never notify SA addresses: absent or true is a bug.
+      if (record.sendNotificationEmail !== 'false') {
+        record.failed = true;
+        return googleError(400, 'badRequest', 'permissions.create requires sendNotificationEmail=false.');
+      }
+      if (parsed.type !== 'user' || (parsed.role !== 'reader' && parsed.role !== 'writer') || emailAddress === '') {
+        record.failed = true;
+        return googleError(400, 'badRequest', 'type=user, role=reader|writer and emailAddress are required.');
+      }
+      if (this.sharingRateLimit.remaining > 0) {
+        this.sharingRateLimit.remaining -= 1;
+        record.failed = true;
+        const res = googleError(403, 'sharingRateLimitExceeded', 'Rate limit exceeded for sharing.');
+        if (this.sharingRateLimit.retryAfterSeconds !== undefined) {
+          res.headers.set('retry-after', String(this.sharingRateLimit.retryAfterSeconds));
+        }
+        return res;
+      }
+      const fault = this.permissionCreateFaults.get(emailAddress);
+      if (fault !== undefined) {
+        record.failed = true;
+        return googleError(fault.status, fault.reason);
+      }
+      return json(this.grant(fileId, emailAddress, parsed.role));
+    }
+
+    if (req.method === 'DELETE' && permissionId !== undefined) {
+      this.permissionDeletes.push({ fileId, permissionId });
+      if (permissionId.startsWith('owner-')) {
+        return googleError(403, 'forbidden', 'The owner permission cannot be removed.');
+      }
+      const index = direct.findIndex((p) => p.id === permissionId);
+      if (index < 0) return googleError(404, 'notFound', 'Permission not found.');
+      direct.splice(index, 1);
+      return new Response(null, { status: 204 });
+    }
+    return googleError(405, 'httpMethodNotAllowed', `${req.method} ${req.url.pathname}`);
+  }
+
   private routeFilesList(req: RecordedGoogleRequest): Response {
+    if (req.url.searchParams.get('corpora') === 'user') return this.routeMyDriveList(req);
     const q = req.url.searchParams.get('q') ?? '';
     const inParents = /'([^']+)' in parents/.exec(q)?.[1];
-    let files = [...this.files.values()].filter((f) => !f.trashed);
+    let files = [...this.files.values()].filter((f) => !f.trashed && f.driveId !== undefined);
     if (inParents !== undefined) {
       files = files.filter((f) => f.parents.includes(inParents));
     }
@@ -532,12 +881,13 @@ export class FakeGoogle {
     if (this.files.has(id)) {
       return googleError(409, 'alreadyExists', 'A file with this ID already exists.');
     }
+    const parents = Array.isArray(body.parents) ? body.parents.map(String) : [this.driveId];
     const file: FakeFile = {
       id,
       name: String(body.name ?? id),
       mimeType: String(body.mimeType ?? 'application/octet-stream'),
-      parents: Array.isArray(body.parents) ? body.parents.map(String) : [this.driveId],
-      driveId: this.driveId,
+      parents,
+      ...this.placementOf(parents),
       trashed: false,
       bytes: new Uint8Array(0),
       headRevisionId: 'rev-1',
@@ -545,6 +895,19 @@ export class FakeGoogle {
     };
     this.files.set(id, file);
     return json(this.fileJson(file));
+  }
+
+  /**
+   * Where a new file lives: under a My Drive parent it is a My Drive file
+   * owned by the operator (no driveId); anywhere else it keeps the original
+   * Shared Drive placement.
+   */
+  private placementOf(parents: string[]): Pick<FakeFile, 'driveId' | 'ownerPrincipal'> {
+    const parent = parents[0] === undefined ? undefined : this.files.get(parents[0]);
+    if (parent !== undefined && parent.driveId === undefined) {
+      return { ownerPrincipal: this.permissionId };
+    }
+    return { driveId: this.driveId };
   }
 
   private async routeUpload(
@@ -558,6 +921,9 @@ export class FakeGoogle {
       if (this.holdNextSessionInit !== undefined) {
         await this.holdNextSessionInit;
         this.holdNextSessionInit = undefined;
+      }
+      if (this.uploadQuotaExceeded) {
+        return googleError(403, 'storageQuotaExceeded', 'The user storage quota has been exceeded.');
       }
       const meta = body.byteLength > 0
         ? (JSON.parse(new TextDecoder().decode(body)) as Record<string, unknown>)
@@ -653,7 +1019,7 @@ export class FakeGoogle {
         name: session.meta.name,
         mimeType: session.meta.mimeType,
         parents: session.meta.parents,
-        driveId: this.driveId,
+        ...this.placementOf(session.meta.parents),
         trashed: false,
         bytes: assembled,
         sha256Checksum: await sha256Hex(assembled),

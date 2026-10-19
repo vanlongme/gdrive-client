@@ -175,7 +175,7 @@ function verifyDirective(
     fileId: 'file-1',
     expected: {
       parentId: 'parent-1',
-      driveId: 'drive-1',
+      mountScope: { mountId: 'mount-1', rootFolderId: 'drive-1', driveId: 'drive-1' },
       totalBytes: '6',
       sha256: SHA,
       md5: MD5,
@@ -192,7 +192,7 @@ function trashDirective(
     attemptId: 'att-1',
     generation: 1,
     writer: WRITER,
-    driveId: 'drive-1',
+    mountScope: { mountId: 'mount-1', rootFolderId: 'drive-1', driveId: 'drive-1' },
     file,
   };
 }
@@ -207,7 +207,9 @@ interface PoolSeed {
   readonly priority?: number;
 }
 
-async function seedMountPool(sas: readonly PoolSeed[]): Promise<MountRecord> {
+async function seedMountPool(
+  sas: readonly PoolSeed[],
+): Promise<MountRecord & { readonly driveId: string }> {
   const u = uid();
   const clientId = `client-${u}`;
   const connId = `conn-${u}`;
@@ -227,9 +229,9 @@ async function seedMountPool(sas: readonly PoolSeed[]): Promise<MountRecord> {
     .run();
   await env.DB
     .prepare(
-      'INSERT INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0)',
+      'INSERT INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)',
     )
-    .bind(mountId, 'M', driveId, connId, connId, 7, 'private', 3)
+    .bind(mountId, 'M', driveId, driveId, connId, connId, 7, 'private', 3)
     .run();
   for (const sa of sas) {
     await env.DB
@@ -256,6 +258,7 @@ async function seedMountPool(sas: readonly PoolSeed[]): Promise<MountRecord> {
     id: mountId,
     label: 'M',
     driveId,
+    rootFolderId: driveId,
     catalogConnectionId: connId,
     writeConnectionId: connId,
     readPoolVersion: 7,

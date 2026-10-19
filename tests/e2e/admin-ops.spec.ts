@@ -136,8 +136,8 @@ test.beforeAll(async ({ playwright }) => {
     `INSERT INTO google_connections (id, oauth_client_id, principal_id, display_email, refresh_envelope, granted_scopes, state, enabled, version, connected_by, created_at, updated_at) VALUES` +
       `('${OPS_CONN}','${clientRowId}','principal-ops-1','e2e-ops-catalog@example.test',NULL,'https://www.googleapis.com/auth/drive','connected',1,1,NULL,${now},${now}),` +
       `('${OPS_CONN_W}','${clientRowId}','principal-ops-2','e2e-ops-write@example.test',NULL,'https://www.googleapis.com/auth/drive','connected',1,1,NULL,${now},${now});` +
-      `INSERT INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES` +
-      `('${OPS_MOUNT}','E2E Ops Mount','ops-drive-1','${OPS_CONN}','${OPS_CONN_W}',1,'private',1,${now},${now});` +
+      `INSERT INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES` +
+      `('${OPS_MOUNT}','E2E Ops Mount','ops-drive-1','ops-drive-1','${OPS_CONN}','${OPS_CONN_W}',1,'private',1,${now},${now});` +
       `INSERT INTO mount_read_credentials (mount_id, service_account_id, priority, weight, created_at) VALUES` +
       `('${OPS_MOUNT}','${saRowId}',0,1,${now});` +
       `INSERT INTO upload_operations (id, owner_id, mount_id, kind, idempotency_hash, input_hash, generated_file_id, pinned_oauth_connection_id, pinned_principal_id, pinned_oauth_client_id, pinned_project_id, state, result, summary, created_at, updated_at, completed_at) VALUES` +

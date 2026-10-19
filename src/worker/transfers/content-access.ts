@@ -21,23 +21,33 @@ import {
 import { authorizeMount, type Actor } from '../auth/grants';
 import type { AuthUser } from '../auth/session';
 import { createCoordinatorTokenSource } from '../drive/coordinator-client';
+import {
+  assertInMount,
+  mountScopeOf,
+  oauthParentLookup,
+} from '../drive/containment';
 import { DriveError, type DriveFailureReason } from '../drive/errors';
 import {
   ApiRequestError,
   failureFromError,
   getMount,
   listReadPool,
+  requireUsableOAuthWriter,
   resolveActor,
   type MountRecord,
 } from '../drive/mounts';
 import { SHORTCUT_MIME_TYPE } from '../drive/providers/common';
+import { createGoogleOAuthProvider } from '../drive/providers/google-oauth';
 import { createServiceAccountReadProvider } from '../drive/providers/service-account-read';
+import { ResourceScopeError } from '../drive/shortcuts';
 import { validateDriveId } from '../drive/transport';
 import type {
   CoordinatorTokenSource,
   DriveFileMeta,
   DriveResourceRef,
+  OAuthCatalogWriteProvider,
   ReadIdentity,
+  ResolvedWriter,
   ServiceAccountContentReadProvider,
 } from '../drive/types';
 import {
@@ -78,6 +88,11 @@ export interface ContentRouteDeps {
   readonly getMount?: GetMountFn;
   readonly resolveSessionActor?: ResolveSessionActorFn;
   readonly readProvider?: ServiceAccountContentReadProvider;
+  /**
+   * OAuth catalog provider used ONLY to prove containment on My Drive
+   * mounts (ancestor walk). It has no content method. Fixture in tests.
+   */
+  readonly oauthProvider?: OAuthCatalogWriteProvider;
   readonly tokenSource?: CoordinatorTokenSource;
   readonly now?: () => number;
 }
@@ -522,6 +537,8 @@ export interface VerifiedFileRead {
   readonly identities: readonly ReadIdentity[];
 }
 
+const OUTSIDE_MOUNT_MESSAGE = 'The file is trashed or outside the mount drive.';
+
 /**
  * File-level facts an SA metadata read must prove before bytes are served:
  * canonical id match, not trashed, inside the mount's drive, and not
@@ -529,7 +546,9 @@ export interface VerifiedFileRead {
  * denies) and never consult OAuth data. Shortcuts are rejected rather than
  * traversed (coordinator F8 decision): content addresses literal file ids
  * only — the client resolves a shortcut target through the catalog, which
- * does the same scoped hop checks under OAuth.
+ * does the same scoped hop checks under OAuth. My Drive mounts additionally
+ * require an OAuth-proven ancestor path (proveMyDriveContainment); the SA's
+ * ability to read a file is never evidence of containment.
  */
 function checkFileMeta(
   meta: DriveFileMeta,
@@ -542,16 +561,17 @@ function checkFileMeta(
       'content: upstream metadata id does not match the requested file',
     );
   }
-  if (
-    meta.trashed === true ||
-    meta.driveId === undefined ||
-    meta.driveId !== mount.driveId
-  ) {
-    throw new ApiRequestError(
-      404,
-      'FILE_NOT_ACCESSIBLE',
-      'The file is trashed or outside the mount drive.',
-    );
+  // Shared Drive: the SA's own driveId verdict, unchanged. My Drive: the SA
+  // can only rule files OUT here (trashed, or a Shared Drive file reported
+  // under a My Drive mount); containment itself is proven afterwards through
+  // the OAuth catalog connection in verifiedFileForRead, never from the SA's
+  // view of the file.
+  const outsideDrive =
+    mount.driveId === null
+      ? meta.driveId !== undefined
+      : meta.driveId === undefined || meta.driveId !== mount.driveId;
+  if (meta.trashed === true || outsideDrive) {
+    throw new ApiRequestError(404, 'FILE_NOT_ACCESSIBLE', OUTSIDE_MOUNT_MESSAGE);
   }
   if (meta.mimeType === SHORTCUT_MIME_TYPE) {
     throw new ApiRequestError(
@@ -580,12 +600,76 @@ function checkFileMeta(
   }
 }
 
+/**
+ * My Drive containment: walk the SA-reported parents upward through the
+ * mount's OAuth CATALOG connection. The SA metadata supplies only the
+ * starting `parents`; every ancestor fact comes from the catalog writer.
+ * Anything unprovable denies: there is no retry through another provider
+ * and the OAuth provider type has no content method to fall back to.
+ */
+async function proveMyDriveContainment(
+  env: Env,
+  mount: MountRecord,
+  meta: DriveFileMeta,
+  signal: AbortSignal | undefined,
+  oauthProvider: OAuthCatalogWriteProvider | undefined,
+): Promise<void> {
+  let writer: ResolvedWriter;
+  try {
+    writer = (
+      await requireUsableOAuthWriter(env.DB, mount.catalogConnectionId, 'catalog')
+    ).writer;
+  } catch (err) {
+    if (err instanceof ApiRequestError) {
+      // A disabled/needs-reauth catalog connection cannot prove anything:
+      // deny as inconclusive (readiness stays 'pending', not 'blocked').
+      throw new DriveError(
+        'upstream-unavailable',
+        'content: the catalog connection cannot prove containment',
+        { cause: err },
+      );
+    }
+    throw err;
+  }
+  const provider =
+    oauthProvider ??
+    createGoogleOAuthProvider({ tokenSource: createCoordinatorTokenSource(env) });
+  try {
+    await assertInMount(
+      mountScopeOf(mount),
+      meta,
+      oauthParentLookup({
+        provider,
+        writer,
+        ...(signal === undefined ? {} : { signal }),
+      }),
+    );
+  } catch (err) {
+    if (err instanceof ResourceScopeError) {
+      throw new ApiRequestError(404, 'FILE_NOT_ACCESSIBLE', OUTSIDE_MOUNT_MESSAGE);
+    }
+    if (
+      err instanceof DriveError &&
+      err.reason !== 'aborted' &&
+      err.reason !== 'rate-limited'
+    ) {
+      throw new DriveError(
+        'upstream-unavailable',
+        'content: ancestor lookup failed; containment is unproven',
+        { cause: err },
+      );
+    }
+    throw err;
+  }
+}
+
 export async function verifiedFileForRead(
   provider: ServiceAccountContentReadProvider,
   env: Env,
   mount: MountRecord,
   fileId: string,
   signal?: AbortSignal,
+  oauthProvider?: OAuthCatalogWriteProvider,
 ): Promise<VerifiedFileRead> {
   const identities = await listReadIdentities(env.DB, mount.id);
   if (identities.length === 0) {
@@ -610,6 +694,11 @@ export async function verifiedFileForRead(
       return { identity, meta };
     },
   );
+  // Proven once per admission, outside the SA failover loop: containment is a
+  // property of the file id, not of which pool identity happened to read it.
+  if (mount.driveId === null) {
+    await proveMyDriveContainment(env, mount, meta, signal, oauthProvider);
+  }
   return {
     meta,
     ref: {
@@ -750,6 +839,7 @@ export async function admitFileRead(
     mount,
     fileId,
     c.req.raw.signal,
+    deps.oauthProvider,
   );
   return { mount, verified, principal: admission.principal };
 }

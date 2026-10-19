@@ -98,6 +98,7 @@ function postJson(app: TestApp, path: string, cookie: string | null, body: unkno
 
 async function resetState() {
   for (const table of [
+    'mount_drive_permissions',
     'upload_batch_nodes',
     'upload_batches',
     'upload_operations',

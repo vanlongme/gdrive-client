@@ -36,6 +36,7 @@ export const FILE_META_FIELDS = [
   'trashed',
   'parents',
   'driveId',
+  'ownedByMe',
   'headRevisionId',
   'md5Checksum',
   'sha256Checksum',
@@ -48,7 +49,7 @@ export const FILE_META_FIELDS = [
 /** Listing/search fields; thumbnail presence only, never the URL. */
 export const FILE_LIST_FIELDS = [
   'nextPageToken',
-  'files(id,name,mimeType,size,modifiedTime,shortcutDetails(targetId,targetMimeType,targetResourceKey),resourceKey,thumbnailLink)',
+  'files(id,name,mimeType,size,modifiedTime,parents,shortcutDetails(targetId,targetMimeType,targetResourceKey),resourceKey,thumbnailLink)',
 ].join(',');
 
 /** SA metadata fields incl. read-side capabilities (spec §7.1). */
@@ -270,6 +271,7 @@ export function parseFileMeta(json: unknown, operation: string): DriveFileMeta {
       ? record.parents.filter((p): p is string => typeof p === 'string')
       : undefined,
     driveId: optionalString(record, 'driveId'),
+    ownedByMe: optionalBoolean(record, 'ownedByMe'),
     headRevisionId: optionalString(record, 'headRevisionId'),
     md5Checksum: optionalString(record, 'md5Checksum'),
     sha256Checksum: optionalString(record, 'sha256Checksum'),
@@ -315,6 +317,9 @@ function parseCatalogEntry(json: unknown, operation: string): CatalogEntry {
         ? optionalString(shortcut, 'targetResourceKey')
         : undefined,
     resourceKey: optionalString(record, 'resourceKey'),
+    parents: Array.isArray(record.parents)
+      ? record.parents.filter((p): p is string => typeof p === 'string')
+      : undefined,
     hasThumbnail: optionalString(record, 'thumbnailLink') !== undefined,
   };
 }

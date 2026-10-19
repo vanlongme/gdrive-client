@@ -28,7 +28,7 @@ import type {
   UploadDirective,
   UploadSessionSnapshot,
 } from '../transfers/upload-internal';
-import { DEFAULT_ATTEMPT_LEASE_MS, DO_ORIGIN } from '../transfers/upload-internal';
+import { DEFAULT_ATTEMPT_LEASE_MS, DO_ORIGIN, isMountScope, pinnedWriterFromJson } from '../transfers/upload-internal';
 
 /**
  * UploadSession — one SQLite Durable Object per upload operation.
@@ -499,7 +499,7 @@ export class UploadSession extends DurableObject<Env> {
   // -----------------------------------------------------------------------
 
   private snapshot(rec: SessionRow): UploadSessionSnapshot {
-    const pinned = JSON.parse(rec.pinned_json) as PinnedUploadWriter;
+    const pinned = pinnedWriterFromJson(rec.pinned_json, rec.mount_id);
     const active = rec.active_attempt_id
       ? this.readAttempt(rec.active_attempt_id)
       : undefined;
@@ -590,7 +590,7 @@ export class UploadSession extends DurableObject<Env> {
     projectId: string;
     kind: string;
   } {
-    const pinned = JSON.parse(rec.pinned_json) as PinnedUploadWriter;
+    const pinned = pinnedWriterFromJson(rec.pinned_json, rec.mount_id);
     return {
       provider: 'google-oauth',
       recordId: rec.upload_id,
@@ -634,7 +634,7 @@ export class UploadSession extends DurableObject<Env> {
   }
 
   private pinned(rec: SessionRow): PinnedUploadWriter {
-    return JSON.parse(rec.pinned_json) as PinnedUploadWriter;
+    return pinnedWriterFromJson(rec.pinned_json, rec.mount_id);
   }
 
   private pendingFile(rec: SessionRow): DriveFileMeta | undefined {
@@ -706,7 +706,7 @@ export class UploadSession extends DurableObject<Env> {
         fileId,
         expected: {
           parentId: rec.parent_id,
-          driveId: writer.driveId,
+          mountScope: writer.mountScope,
           totalBytes: rec.total_bytes as DecimalBytes,
           sha256: rec.sha256,
           md5: rec.md5,
@@ -756,7 +756,7 @@ export class UploadSession extends DurableObject<Env> {
           attemptId: a.attempt_id,
           generation: gen,
           writer,
-          driveId: writer.driveId,
+          mountScope: writer.mountScope,
           file: pending,
         };
       }
@@ -792,7 +792,7 @@ export class UploadSession extends DurableObject<Env> {
           generation: gen,
           writer,
           fileId: rec.generated_file_id,
-          driveId: writer.driveId,
+          mountScope: writer.mountScope,
         };
       }
       if (
@@ -809,7 +809,7 @@ export class UploadSession extends DurableObject<Env> {
           generation: gen,
           writer,
           generatedFileId: rec.generated_file_id,
-          driveId: writer.driveId,
+          mountScope: writer.mountScope,
           upload: {
             parentId: rec.parent_id,
             name: rec.name,
@@ -943,7 +943,8 @@ export class UploadSession extends DurableObject<Env> {
       asString(pinned.principalId) === undefined ||
       asString(pinned.oauthClientId) === undefined ||
       asString(pinned.projectId) === undefined ||
-      asString(pinned.driveId) === undefined ||
+      asString(cmd.mountId) === undefined ||
+      !isMountScope(pinned.mountScope, cmd.mountId) ||
       asNonNegativeInt(pinned.connectionVersion) === undefined ||
       asNonNegativeInt(pinned.oauthClientVersion) === undefined ||
       asNonNegativeInt(cmd.chunkSize) === undefined ||
@@ -1247,7 +1248,7 @@ export class UploadSession extends DurableObject<Env> {
         generation: rec.session_generation,
         writer: this.pinned(rec),
         fileId: rec.generated_file_id as string,
-        driveId: this.pinned(rec).driveId,
+        mountScope: this.pinned(rec).mountScope,
       });
     }
     if (
@@ -1740,7 +1741,7 @@ export class UploadSession extends DurableObject<Env> {
           attemptId: attempt.attempt_id,
           generation: rec.session_generation,
           writer: pinned,
-          driveId: pinned.driveId,
+          mountScope: pinned.mountScope,
           file,
         },
         applied: false,

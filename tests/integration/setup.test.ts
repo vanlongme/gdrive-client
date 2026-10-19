@@ -43,6 +43,7 @@ function postSetup(body: unknown, headers?: HeadersInit): Promise<Response> {
 
 async function resetState() {
   for (const table of [
+    "mount_drive_permissions",
     "app_settings",
     "setup_throttle",
     "user",

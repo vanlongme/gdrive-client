@@ -38,6 +38,7 @@ import {
   statusForApiCode,
   type MountRecord,
 } from '../drive/mounts';
+import { invalidateFolder } from '../drive/containment';
 import { isDriveError } from '../drive/errors';
 import { isMaintenanceActive } from '../security/rotation';
 import {
@@ -474,7 +475,7 @@ async function runRemoteInit(
     provider,
     writer,
     parentId: directive.upload.parentId,
-    driveId: ctx.pinned.driveId,
+    mountScope: ctx.pinned.mountScope,
     ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
   });
   if (!dest.ok) {
@@ -533,6 +534,9 @@ async function runRemoteInit(
         generatedId: directive.generatedFileId,
         ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
       });
+      // The generated id may carry a cached "outside" verdict from an
+      // earlier 404 lookup; the new folder must be re-walked.
+      invalidateFolder(ctx.pinned.mountScope, file.id);
       return {
         type: 'remote-init-result',
         outcome: { kind: 'created', file },
@@ -628,7 +632,7 @@ async function lookupGenerated(
   const drive = await proveDriveAccess({
     provider,
     writer,
-    driveId: ctx.pinned.driveId,
+    mountScope: ctx.pinned.mountScope,
     ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
   });
   if (!drive.ok) {
@@ -640,7 +644,7 @@ async function lookupGenerated(
     provider,
     writer,
     parentId: ctx.snapshot.parentId,
-    driveId: ctx.pinned.driveId,
+    mountScope: ctx.pinned.mountScope,
     ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
   });
   if (!parent.ok) {
@@ -933,7 +937,7 @@ export function createUploadRouter(deps: UploadRouterDeps = {}) {
       }
 
       const stub = stubFor(c.env, operation.id);
-      const pinned = pinnedFromRow(operation, mount.driveId);
+      const pinned = pinnedFromRow(operation, mount);
       const res = await doCommand(stub, '/initialize', {
         uploadId: operation.id,
         ownerId: operation.owner_id,

@@ -35,9 +35,10 @@ import {
  */
 export default defineConfig({
   testDir: "./tests/e2e",
-  // The fake-Google journey runs against its own Miniflare server on :8878
-  // through playwright.journey.config.ts, never against this :8877 preview.
-  testIgnore: /journey\.spec\.ts$/,
+  // The fake-Google journey and My Drive specs run against their own
+  // Miniflare server on :8878 through playwright.journey.config.ts, never
+  // against this :8877 preview.
+  testIgnore: /(journey|my-drive)\.spec\.ts$/,
   timeout: 30_000,
   fullyParallel: true,
   workers: 1,

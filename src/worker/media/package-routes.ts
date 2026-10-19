@@ -782,6 +782,7 @@ export function createPackageRouter(deps: PackageRouterDeps = {}) {
         mount,
         resource.fileId,
         c.req.raw.signal,
+        oauthProviderFor(c.env),
       ).catch(async (err: unknown) => {
         if (err instanceof DriveError && (err.reason === 'not-found' || err.reason === 'gone')) {
           await markPackageStale(c.env.DB, pkg, now());

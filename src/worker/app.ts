@@ -23,6 +23,8 @@ import { createCatalogRouter } from "./drive/catalog";
 import { createContentRouter } from "./transfers/download";
 import { createShareRouter } from "./security/shares";
 import { createAdminRouter } from "./admin/routes";
+import { createReadGrantsRouter } from "./admin/read-grants-routes";
+import { createDriveFoldersRouter } from "./admin/drive-folders-routes";
 import { createMaintenanceRouter } from "./admin/maintenance";
 import { createDiagnosticsRouter } from "./admin/diagnostics";
 import { createUploadRouter } from "./transfers/upload-routes";
@@ -247,6 +249,8 @@ export function createApp() {
   app.route("/api/v1/admin/google", createOAuthRouter());
   app.route("/api/v1/admin/maintenance", createMaintenanceRouter());
   app.route("/api/v1/admin/diagnostics", createDiagnosticsRouter());
+  app.route("/api/v1/admin/drive-folders", createDriveFoldersRouter());
+  app.route("/api/v1/admin", createReadGrantsRouter());
   app.route("/api/v1/admin", createAdminRouter());
 
   app.route("/api/v1/mounts", createContentRouter());

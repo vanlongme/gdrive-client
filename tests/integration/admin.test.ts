@@ -93,6 +93,7 @@ function postJson(path: string, cookie: string, body: unknown): Promise<Response
 async function resetState() {
   // Dependents first — FK references run child → parent.
   for (const table of [
+    'mount_drive_permissions',
     'mount_grants',
     'mount_read_credentials',
     'file_readiness',
@@ -134,12 +135,13 @@ async function seedMount(
   options: { driveId?: string; visibility?: string; catalog?: string; write?: string } = {},
 ) {
   await env.DB.prepare(
-    'INSERT INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) ' +
-      'VALUES (?, ?, ?, ?, ?, 1, ?, 1, 0, 0)',
+    'INSERT INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) ' +
+      'VALUES (?, ?, ?, ?, ?, ?, 1, ?, 1, 0, 0)',
   )
     .bind(
       id,
       `Mount ${id}`,
+      options.driveId ?? DRIVE_A,
       options.driveId ?? DRIVE_A,
       options.catalog ?? 'conn-1',
       options.write ?? 'conn-1',
@@ -148,7 +150,10 @@ async function seedMount(
     .run();
 }
 
-async function seedConnection(id: string, options: { state?: string; enabled?: number } = {}) {
+async function seedConnection(
+  id: string,
+  options: { state?: string; enabled?: number; principal?: string } = {},
+) {
   await env.DB.prepare(
     'INSERT INTO google_oauth_clients (id, project_id, client_id, secret_envelope, redirect_uri, enabled, version, created_at, updated_at) ' +
       'VALUES (?, ?, ?, ?, ?, 1, 1, 0, 0)',
@@ -162,7 +167,7 @@ async function seedConnection(id: string, options: { state?: string; enabled?: n
     .bind(
       id,
       `oc-${id}`,
-      'perm-1',
+      options.principal ?? 'perm-1',
       'op@example.com',
       null,
       'https://www.googleapis.com/auth/drive',
@@ -757,7 +762,7 @@ describe('mount create/update/read-pool (fixture provider)', () => {
     });
     expect(res.status).toBe(400);
     expect(ApiErrorBodySchema.parse(await res.json()).error.code).toBe(
-      'VALIDATION_FAILED',
+      'MOUNT_ROOT_NOT_FOLDER',
     );
   });
 
@@ -782,7 +787,7 @@ describe('mount create/update/read-pool (fixture provider)', () => {
     });
     expect(res.status).toBe(400);
     expect(ApiErrorBodySchema.parse(await res.json()).error.code).toBe(
-      'VALIDATION_FAILED',
+      'MOUNT_ROOT_NOT_WRITABLE',
     );
     const mounts = await env.DB.prepare('SELECT COUNT(*) AS n FROM mounts').first<{
       n: number;
@@ -822,7 +827,7 @@ describe('mount create/update/read-pool (fixture provider)', () => {
     });
     expect(res.status).toBe(400);
     expect(ApiErrorBodySchema.parse(await res.json()).error.code).toBe(
-      'VALIDATION_FAILED',
+      'MOUNT_WRITER_MISMATCH',
     );
     const mounts = await env.DB.prepare('SELECT COUNT(*) AS n FROM mounts').first<{
       n: number;
@@ -1183,5 +1188,217 @@ describe('shared drives listing (real surface)', () => {
     expect(ApiErrorBodySchema.parse(await res.json()).error.code).toBe(
       'GOOGLE_REAUTH_REQUIRED',
     );
+  });
+});
+
+// ===========================================================================
+// Wave 7: My Drive folder mounts — kind detection, the six validation codes
+// and the legacy driveId alias (spec 2026-10-18 §2.3, §6; Review Focus #3).
+// ===========================================================================
+
+const MY_FOLDER = '1MyFolderAAAAbbbb';
+const MY_DRIVE_ROOT = '0AMyDriveRootxx';
+
+function myFolderMeta(over: Partial<DriveFileMeta> = {}): DriveFileMeta {
+  return {
+    id: MY_FOLDER,
+    name: 'Family photos',
+    mimeType: 'application/vnd.google-apps.folder',
+    parents: [MY_DRIVE_ROOT],
+    ownedByMe: true,
+    capabilities: { canAddChildren: true },
+    hasThumbnail: false,
+    ...over,
+  };
+}
+
+function postMount(oauth: FakeOAuthProvider, body: Record<string, unknown>): Promise<Response> {
+  return fixtureApi(makeFixtureApp({ oauth }), '/api/v1/admin/mounts', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      label: 'Family',
+      catalogConnectionId: 'conn-1',
+      writeConnectionId: 'conn-1',
+      serviceAccountIds: [],
+      visibility: 'private',
+      ...body,
+    }),
+  });
+}
+
+async function expectRejected(res: Response, code: string): Promise<void> {
+  expect(res.status).toBe(400);
+  expect(ApiErrorBodySchema.parse(await res.json()).error.code).toBe(code);
+  const mounts = await env.DB.prepare('SELECT COUNT(*) AS n FROM mounts').first<{ n: number }>();
+  expect(mounts?.n).toBe(0);
+}
+
+async function seedMyDriveMount(id: string, rootFolderId: string) {
+  await env.DB.prepare(
+    'INSERT INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) ' +
+      "VALUES (?, ?, NULL, ?, 'conn-1', 'conn-1', 1, 'public_read', 1, 0, 0)",
+  )
+    .bind(id, `Mount ${id}`, rootFolderId)
+    .run();
+}
+
+describe('My Drive folder mounts (fixture provider)', () => {
+  it('creates a My Drive folder mount: kind my_drive_folder, driveId null', async () => {
+    await fixtureSeed();
+    await env.DB.prepare(
+      'INSERT INTO service_accounts (id, project_id, email, key_id, envelope, enabled, version, created_at, updated_at) ' +
+        "VALUES ('sa-1', 'proj-1', 'r@p.iam.gserviceaccount.com', 'k1', 'env', 1, 1, 0, 0)",
+    ).run();
+    const oauth = new FakeOAuthProvider();
+    oauth.metas.set(MY_FOLDER, myFolderMeta());
+    const res = await postMount(oauth, {
+      rootFolderId: MY_FOLDER,
+      writeConnectionId: 'conn-2',
+      serviceAccountIds: ['sa-1'],
+    });
+    expect(res.status).toBe(200);
+    const { mount } = z.looseObject({ mount: MountAdminViewSchema }).parse(await res.json());
+    expect(mount).toMatchObject({
+      kind: 'my_drive_folder',
+      driveId: null,
+      rootFolderId: MY_FOLDER,
+      readGrants: { ready: 0, total: 1 },
+    });
+    // Catalog and (different-connection, same-principal) write identity both
+    // proved ownership + canAddChildren.
+    expect(oauth.metadataCalls.map((c) => c.writer.connectionId)).toEqual(['conn-1', 'conn-2']);
+    const row = await env.DB.prepare('SELECT drive_id, root_folder_id FROM mounts WHERE id = ?')
+      .bind(mount.id)
+      .first();
+    expect(row).toEqual({ drive_id: null, root_folder_id: MY_FOLDER });
+  });
+
+  it('keeps the legacy driveId alias creating a Shared Drive mount', async () => {
+    await fixtureSeed();
+    const oauth = new FakeOAuthProvider();
+    oauth.metas.set(DRIVE_A, driveRootMeta({ capabilities: { canAddChildren: true } }));
+    const res = await postMount(oauth, { driveId: DRIVE_A });
+    expect(res.status).toBe(200);
+    const { mount } = z.looseObject({ mount: MountAdminViewSchema }).parse(await res.json());
+    expect(mount).toMatchObject({ kind: 'shared_drive', driveId: DRIVE_A, rootFolderId: DRIVE_A });
+    expect(mount.readGrants).toBeUndefined();
+  });
+
+  it('accepts rootFolderId and driveId together only when equal', async () => {
+    await fixtureSeed();
+    const oauth = new FakeOAuthProvider();
+    oauth.metas.set(DRIVE_A, driveRootMeta({ capabilities: { canAddChildren: true } }));
+    expect((await postMount(oauth, { rootFolderId: DRIVE_A, driveId: DRIVE_A })).status).toBe(200);
+    await env.DB.prepare('DELETE FROM mounts').run();
+    await expectRejected(
+      await postMount(oauth, { rootFolderId: MY_FOLDER, driveId: DRIVE_A }),
+      'VALIDATION_FAILED',
+    );
+    await expectRejected(await postMount(oauth, {}), 'VALIDATION_FAILED');
+  });
+
+  // Review Focus #3 (server half): a pasted Docs URL parses to a document id.
+  it.each([
+    ['a non-folder id', '1DocsFileId', myFolderMeta({ id: '1DocsFileId', mimeType: 'application/vnd.google-apps.document' }), 'MOUNT_ROOT_NOT_FOLDER'],
+    ['a trashed folder', MY_FOLDER, myFolderMeta({ trashed: true }), 'MOUNT_ROOT_TRASHED'],
+    ['a folder shared with me', MY_FOLDER, myFolderMeta({ ownedByMe: false, parents: undefined }), 'MOUNT_ROOT_NOT_OWNED'],
+    ['a Shared Drive subfolder', '1SharedSubfolder', driveRootMeta({ id: '1SharedSubfolder', capabilities: { canAddChildren: true } }), 'MOUNT_ROOT_NOT_OWNED'],
+    ['the My Drive root itself', MY_DRIVE_ROOT, myFolderMeta({ id: MY_DRIVE_ROOT, parents: [] }), 'MOUNT_ROOT_IS_MY_DRIVE'],
+    ['a folder the writer cannot add to', MY_FOLDER, myFolderMeta({ capabilities: {} }), 'MOUNT_ROOT_NOT_WRITABLE'],
+  ] as const)('rejects %s', async (_label, id, meta, code) => {
+    await fixtureSeed();
+    const oauth = new FakeOAuthProvider();
+    oauth.metas.set(id, meta);
+    await expectRejected(await postMount(oauth, { rootFolderId: id }), code);
+  });
+
+  it('rejects a write connection of another Google account with MOUNT_WRITER_MISMATCH', async () => {
+    await fixtureSeed();
+    await seedConnection('conn-3', { principal: 'perm-other' });
+    const oauth = new FakeOAuthProvider();
+    oauth.metas.set(MY_FOLDER, myFolderMeta());
+    await expectRejected(
+      await postMount(oauth, { rootFolderId: MY_FOLDER, writeConnectionId: 'conn-3' }),
+      'MOUNT_WRITER_MISMATCH',
+    );
+    // Rejected before the second identity is even asked.
+    expect(oauth.metadataCalls.map((c) => c.writer.connectionId)).toEqual(['conn-1']);
+    // Same principal, but the writer does not see an owned folder.
+    oauth.metasByWriter.set(`conn-2|${MY_FOLDER}`, myFolderMeta({ ownedByMe: false }));
+    await expectRejected(
+      await postMount(oauth, { rootFolderId: MY_FOLDER, writeConnectionId: 'conn-2' }),
+      'MOUNT_WRITER_MISMATCH',
+    );
+  });
+
+  it('PATCH re-validates new connections against the stored root and kind', async () => {
+    await fixtureSeed();
+    await seedMyDriveMount('m-my', MY_FOLDER);
+    await seedConnection('conn-3', { principal: 'perm-other' });
+    const oauth = new FakeOAuthProvider();
+    oauth.metas.set(MY_FOLDER, myFolderMeta());
+    const app = makeFixtureApp({ oauth });
+    const patch = (writeConnectionId: string) =>
+      fixtureApi(app, '/api/v1/admin/mounts/m-my', {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ writeConnectionId }),
+      });
+    expect((await patch('conn-2')).status).toBe(200);
+    const bad = await patch('conn-3');
+    expect(bad.status).toBe(400);
+    expect(ApiErrorBodySchema.parse(await bad.json()).error.code).toBe('MOUNT_WRITER_MISMATCH');
+    const row = await env.DB.prepare(
+      'SELECT drive_id, root_folder_id, write_connection_id FROM mounts WHERE id = ?',
+    )
+      .bind('m-my')
+      .first();
+    expect(row).toEqual({ drive_id: null, root_folder_id: MY_FOLDER, write_connection_id: 'conn-2' });
+  });
+});
+
+describe('My Drive folder mounts on the real surface', () => {
+  it('lists the mount with rootFolderId from the column and readGrants N/M', async () => {
+    await completeSetup();
+    const cookie = await adminCookie();
+    await seedConnection('conn-1');
+    await seedMyDriveMount('m-my', MY_FOLDER);
+    await env.DB.batch([
+      env.DB.prepare(
+        'INSERT INTO service_accounts (id, project_id, email, key_id, envelope, enabled, version, created_at, updated_at) ' +
+          "VALUES ('sa-1', 'proj-1', 'a@p.iam.gserviceaccount.com', 'k1', 'env', 1, 1, 0, 0), " +
+          "('sa-2', 'proj-1', 'b@p.iam.gserviceaccount.com', 'k2', 'env', 1, 1, 0, 0)",
+      ),
+      env.DB.prepare(
+        'INSERT INTO mount_read_credentials (mount_id, service_account_id, priority, weight, created_at) ' +
+          "VALUES ('m-my', 'sa-1', 0, 1, 0), ('m-my', 'sa-2', 0, 1, 0)",
+      ),
+      env.DB.prepare(
+        'INSERT INTO mount_drive_permissions (mount_id, service_account_id, permission_id, state, last_error_code, updated_at) ' +
+          "VALUES ('m-my', 'sa-1', 'perm-a', 'granted', NULL, 0), " +
+          "('m-my', 'sa-2', NULL, 'pending', 'grant:rate_limited', 0)",
+      ),
+    ]);
+    try {
+      const list = await api('/api/v1/mounts', { headers: { cookie } });
+      expect(list.status).toBe(200);
+      const { mounts } = MountListResponseSchema.parse(await list.json());
+      expect(mounts.map((m) => [m.id, m.rootFolderId])).toEqual([['m-my', MY_FOLDER]]);
+      const admin = await api('/api/v1/admin/mounts', { headers: { cookie } });
+      expect(admin.status).toBe(200);
+      const parsed = z.looseObject({ mounts: z.array(MountAdminViewSchema) }).parse(await admin.json());
+      expect(parsed.mounts[0]).toMatchObject({
+        id: 'm-my',
+        kind: 'my_drive_folder',
+        driveId: null,
+        rootFolderId: MY_FOLDER,
+        readGrants: { ready: 1, total: 2 },
+      });
+    } finally {
+      // The D1 is shared across files: never leave rows that would block a
+      // later file's `DELETE FROM mounts`.
+      await env.DB.prepare('DELETE FROM mount_drive_permissions').run();
+    }
   });
 });

@@ -347,7 +347,7 @@ async function seedD1(db, rootDir) {
     "INSERT INTO \"user\" (id, name, email, emailVerified, createdAt, updatedAt) VALUES ('user-1','Probe','probe@test',1,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z')",
     "INSERT INTO google_oauth_clients (id, project_id, client_id, secret_envelope, redirect_uri, enabled, version, created_at, updated_at) VALUES ('client-local','proj-local','cid-local','unused','https://app.test/cb',1,1,0,0)",
     "INSERT INTO google_connections (id, oauth_client_id, principal_id, display_email, refresh_envelope, granted_scopes, state, enabled, version, connected_by, created_at, updated_at) VALUES ('conn-local','client-local','perm-local','w@test',NULL,'','connected',1,1,'user-1',0,0)",
-    "INSERT INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES ('m-local','Local','drive-local','conn-local','conn-local',1,'private',1,0,0)",
+    "INSERT INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES ('m-local','Local','drive-local','drive-local','conn-local','conn-local',1,'private',1,0,0)",
     "INSERT INTO mount_grants (user_id, mount_id, role, operations, granted_by, created_at, updated_at) VALUES ('user-1','m-local','uploader','[\"read\",\"upload\"]','user-1',0,0)",
     "INSERT INTO service_accounts (id, project_id, email, key_id, envelope, enabled, version, created_at, updated_at) VALUES ('sa-local','proj-local','sa@local.test','key','unused',1,1,0,0)",
     "INSERT INTO mount_read_credentials (mount_id, service_account_id, priority, weight, created_at) VALUES ('m-local','sa-local',1,1,0)",

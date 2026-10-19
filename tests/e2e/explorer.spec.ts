@@ -379,12 +379,17 @@ test("scoped search sends q/scope/folderId and restores browse [fixture]", async
     // Folder-scope search carries the current folder ID.
     await page.locator("#explorer-scope").selectOption("folder");
     await page.getByRole("button", { name: "Tìm", exact: true }).click();
-    expect(
-      calls.searches.some(
-        (q) => q.includes("scope=folder") && q.includes("folderId=root-folder"),
-      ),
-      `searches: ${JSON.stringify(calls.searches)}`,
-    ).toBe(true);
+    // The click only schedules the request; poll until the route sees it.
+    await expect
+      .poll(
+        () =>
+          calls.searches.some(
+            (q) =>
+              q.includes("scope=folder") && q.includes("folderId=root-folder"),
+          ),
+        { message: `searches: ${JSON.stringify(calls.searches)}` },
+      )
+      .toBe(true);
 
     // Clearing returns to the folder listing.
     await page.getByRole("button", { name: "Xóa tìm kiếm" }).click();

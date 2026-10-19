@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import { IdSchema, IsoTimestampSchema } from './common';
-import { MountOperationSchema, MountVisibilitySchema } from './drive';
+import {
+  MountKindSchema,
+  MountOperationSchema,
+  MountVisibilitySchema,
+} from './drive';
 
 export const SETUP_STATES = ['uninitialized', 'in_progress', 'complete'] as const;
 export const SetupStateSchema = z.enum(SETUP_STATES);
@@ -90,17 +94,29 @@ export const ServiceAccountViewSchema = z
   .strict();
 export type ServiceAccountView = z.infer<typeof ServiceAccountViewSchema>;
 
+// Pool read access on a My Drive mount: rows in 'granted' state over the
+// number of SAs in the read pool (spec 2026-10-18 §5 Readiness).
+export const MountReadGrantsSummarySchema = z
+  .object({ ready: z.number().int().min(0), total: z.number().int().min(0) })
+  .strict();
+export type MountReadGrantsSummary = z.infer<typeof MountReadGrantsSummarySchema>;
+
 export const MountAdminViewSchema = z
   .object({
     id: IdSchema,
     label: z.string().min(1).max(256),
-    driveId: z.string().min(1),
+    kind: MountKindSchema,
+    rootFolderId: IdSchema,
+    /** null for a My Drive folder mount. */
+    driveId: z.string().min(1).nullable(),
     catalogConnectionId: IdSchema,
     writeConnectionId: IdSchema,
     readPoolVersion: z.number().int().min(1),
     visibility: MountVisibilitySchema,
     policyVersion: z.number().int().min(1),
     readPool: z.array(ServiceAccountViewSchema),
+    /** My Drive folder mounts only. */
+    readGrants: MountReadGrantsSummarySchema.optional(),
   })
   .strict();
 export type MountAdminView = z.infer<typeof MountAdminViewSchema>;
@@ -209,23 +225,42 @@ export type ImportServiceAccountRequest = z.infer<
   typeof ImportServiceAccountRequestSchema
 >;
 
-// POST /api/v1/admin/mounts — create a mount over a full Shared Drive with
-// separate catalog/write OAuth connections and an SA read pool.
+// POST /api/v1/admin/mounts — create a mount over a Shared Drive or a folder
+// in the owner's My Drive, with separate catalog/write OAuth connections and
+// an SA read pool. `rootFolderId` names the root; the legacy `driveId` is an
+// alias for it (both present and different => 400). The server, not the
+// client, decides the kind (spec 2026-10-18 §2.3).
 export const CreateMountRequestSchema = z
   .object({
     label: z.string().min(1).max(256),
-    driveId: IdSchema,
+    rootFolderId: IdSchema.optional(),
+    driveId: IdSchema.optional(),
     catalogConnectionId: IdSchema,
     writeConnectionId: IdSchema,
     serviceAccountIds: z.array(IdSchema).max(100).default([]),
     visibility: MountVisibilitySchema.default('private'),
   })
-  .strict();
-export type CreateMountRequest = z.infer<typeof CreateMountRequestSchema>;
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.rootFolderId === undefined && value.driveId === undefined) {
+      ctx.addIssue({ code: 'custom', path: ['rootFolderId'], message: 'rootFolderId is required' });
+    }
+    if (value.rootFolderId !== undefined && value.driveId !== undefined && value.rootFolderId !== value.driveId) {
+      ctx.addIssue({ code: 'custom', path: ['driveId'], message: 'driveId must equal rootFolderId when both are sent' });
+    }
+  })
+  .transform(({ rootFolderId, driveId, ...rest }) => ({
+    ...rest,
+    rootFolderId: rootFolderId ?? driveId ?? '',
+  }));
+/** Wire shape a client sends. */
+export type CreateMountRequest = z.input<typeof CreateMountRequestSchema>;
+/** Normalized server input: the alias is folded into rootFolderId. */
+export type CreateMountInput = z.output<typeof CreateMountRequestSchema>;
 
-// PATCH /api/v1/admin/mounts/:id — update display/policy fields; driveId is
-// immutable for v1. Changing visibility or either connection bumps
-// policyVersion, which restarts signed pagination.
+// PATCH /api/v1/admin/mounts/:id — update display/policy fields; the root
+// folder, drive id and kind are immutable. Changing visibility or either
+// connection bumps policyVersion, which restarts signed pagination.
 export const UpdateMountRequestSchema = z
   .object({
     label: z.string().min(1).max(256).optional(),
@@ -302,3 +337,25 @@ export const UserResponseSchema = z
 export const UserListResponseSchema = z
   .object({ users: z.array(UserViewSchema) })
   .strict();
+
+// GET /api/v1/admin/drive-folders (wave 7): the folders a connected account
+// owns in its personal My Drive, one level at a time, for the mount picker.
+// nextPageToken is Google's opaque token, echoed back for the next page
+// (admin-only surface, same as the Shared Drive chooser).
+export const DriveFolderEntrySchema = z
+  .object({
+    id: IdSchema,
+    name: z.string().min(1).max(32768),
+  })
+  .strict();
+export type DriveFolderEntry = z.infer<typeof DriveFolderEntrySchema>;
+
+export const DriveFolderListResponseSchema = z
+  .object({
+    folders: z.array(DriveFolderEntrySchema),
+    nextPageToken: z.string().min(1).optional(),
+  })
+  .strict();
+export type DriveFolderListResponse = z.infer<
+  typeof DriveFolderListResponseSchema
+>;

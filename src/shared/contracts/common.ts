@@ -81,12 +81,25 @@ export const INTERNAL_ERROR_CODES = [
   'ORIGIN_REJECTED',
   'BOOTSTRAP_SECRETS_INVALID',
   'IDEMPOTENCY_CONFLICT',
+  'MOUNT_KIND_UNSUPPORTED',
   'INTERNAL_ERROR',
+] as const;
+
+// Mount target validation (wave 7, spec 2026-10-18 §6). All HTTP 400;
+// the SPA localizes each code (src/web/lib/error-message.ts).
+export const MOUNT_ERROR_CODES = [
+  'MOUNT_ROOT_NOT_FOLDER',
+  'MOUNT_ROOT_NOT_OWNED',
+  'MOUNT_ROOT_IS_MY_DRIVE',
+  'MOUNT_ROOT_TRASHED',
+  'MOUNT_ROOT_NOT_WRITABLE',
+  'MOUNT_WRITER_MISMATCH',
 ] as const;
 
 export const API_ERROR_CODES = [
   ...SPEC_ERROR_CODES,
   ...INTERNAL_ERROR_CODES,
+  ...MOUNT_ERROR_CODES,
 ] as const;
 export const ApiErrorCodeSchema = z.enum(API_ERROR_CODES);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;

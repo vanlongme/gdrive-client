@@ -64,9 +64,9 @@ async function insertMount(
   await insertConnectionChain(ids);
   await PREP(
     `INSERT INTO mounts
-       (id, label, drive_id, catalog_connection_id, write_connection_id,
-        created_at, updated_at)
-     VALUES (?, 'Mount', 'drive-1', ?, ?, ?, ?)`,
+       (id, label, drive_id, root_folder_id, catalog_connection_id,
+        write_connection_id, created_at, updated_at)
+     VALUES (?, 'Mount', 'drive-1', 'drive-1', ?, ?, ?, ?)`,
     id,
     ids.connection,
     ids.connection,

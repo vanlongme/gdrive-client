@@ -6,8 +6,9 @@
  * exposes — SHA-256 first, MD5 as the content-diff fallback, and an
  * explicit 'none' when upstream carries no checksum at all. A failed
  * comparison is a conflict, never a silent pass; an unreadable upstream
- * is retried, not failed. Missing metadata (no driveId, empty/absent
- * parents, absent size) fails closed — it is never treated as success.
+ * is retried, not failed. Missing metadata (no driveId on a Shared Drive
+ * mount, a driveId on a My Drive mount, empty/absent parents, absent size)
+ * fails closed — it is never treated as success.
  *
  * readerAccessState is a separate axis: after the write completes the SA
  * read pool is probed within its current versions; a 403/404 or
@@ -22,6 +23,7 @@ import {
   listReadPool,
   type MountRecord,
 } from '../drive/mounts';
+import { mountScopeOf } from '../drive/containment';
 import type {
   DriveFileMeta,
   OAuthCatalogWriteProvider,
@@ -29,6 +31,7 @@ import type {
 } from '../drive/types';
 import { decimalBytesToBigInt } from '../../shared/contracts/common';
 import type { ReaderAccessState } from '../../shared/contracts/common';
+import { driveMatchesScope } from './upload-internal';
 import type { UploadDirective, UploadSessionEvent } from './upload-internal';
 
 export type VerifyDirective = Extract<UploadDirective, { kind: 'verify' }>;
@@ -79,7 +82,7 @@ export async function runVerify(args: {
   if (file.trashed === true) {
     return failed('file is trashed');
   }
-  if (file.driveId === undefined || file.driveId !== expected.driveId) {
+  if (!driveMatchesScope(file.driveId, expected.mountScope)) {
     return failed('file is on a different drive');
   }
   if (
@@ -240,7 +243,7 @@ export async function checkReaderAccess(args: {
     if (meta.trashed === true) {
       return { ...versions, state: 'blocked', reason: 'file is trashed' };
     }
-    if (meta.driveId === undefined || meta.driveId !== mount.driveId) {
+    if (!driveMatchesScope(meta.driveId, mountScopeOf(mount))) {
       return {
         ...versions,
         state: 'blocked',

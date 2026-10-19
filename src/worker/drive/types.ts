@@ -11,6 +11,7 @@
  */
 
 import type { DecimalBytes } from '../../shared/contracts/common';
+import type { MountScope } from './containment';
 
 // ---------------------------------------------------------------------------
 // Identities
@@ -240,6 +241,8 @@ export interface DriveFileMeta {
   readonly trashed?: boolean;
   readonly parents?: readonly string[];
   readonly driveId?: string;
+  /** True when the requesting principal owns the file (My Drive mounts). */
+  readonly ownedByMe?: boolean;
   readonly headRevisionId?: string;
   readonly md5Checksum?: string;
   readonly sha256Checksum?: string;
@@ -276,6 +279,8 @@ export interface CatalogEntry {
   /** Resource key Google may require to address the shortcut target. */
   readonly shortcutTargetResourceKey?: string;
   readonly resourceKey?: string;
+  /** Parent folder ids as listed (My Drive: at most one). Containment input only; never in a DTO. */
+  readonly parents?: readonly string[];
   readonly hasThumbnail: boolean;
 }
 
@@ -323,7 +328,8 @@ export interface ProviderRequestContext {
 
 export interface ListChildrenInput extends ProviderRequestContext {
   readonly writer: ResolvedWriter;
-  readonly driveId: string;
+  /** Shared Drive scope lists with corpora=drive, My Drive scope with corpora=user. */
+  readonly scope: MountScope;
   readonly parentFolderId: string;
   readonly pageToken?: string;
   readonly pageSize?: number;
@@ -331,11 +337,15 @@ export interface ListChildrenInput extends ProviderRequestContext {
 
 export interface SearchFilesInput extends ProviderRequestContext {
   readonly writer: ResolvedWriter;
-  readonly driveId: string;
+  readonly scope: MountScope;
   /** Raw user query text; the provider escapes it into the Drive `q` term. */
   readonly query: string;
-  readonly scope: 'folder' | 'drive';
-  /** Required when scope is 'folder' (direct children of one folder). */
+  /**
+   * 'folder' searches the direct children of `folderId`; 'drive' searches
+   * the whole corpus (for My Drive the caller filters hits by containment).
+   */
+  readonly searchScope: 'folder' | 'drive';
+  /** Required when searchScope is 'folder' (direct children of one folder). */
   readonly folderId?: string;
   readonly pageToken?: string;
   readonly pageSize?: number;

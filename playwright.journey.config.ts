@@ -13,15 +13,25 @@ import { defineConfig } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "./tests/e2e",
-  testMatch: /journey\.spec\.ts/,
   timeout: 120_000,
   fullyParallel: false,
   workers: 1,
   reporter: "list",
-  use: {
-    baseURL: "http://localhost:8878",
-    channel: "chrome",
-  },
+  use: { baseURL: "http://localhost:8878" },
+  projects: [
+    {
+      name: "chromium",
+      use: { channel: "chrome" },
+      testMatch: /(journey|my-drive)\.spec\.ts$/,
+    },
+    // journey.spec.ts uses fixed names and cannot run twice on one server;
+    // my-drive.spec.ts namespaces everything by project name.
+    {
+      name: "firefox",
+      use: { browserName: "firefox" },
+      testMatch: /my-drive\.spec\.ts$/,
+    },
+  ],
   webServer: {
     command: "npx tsx tests/e2e/journey-server.ts",
     url: "http://localhost:8878/api/v1/health",

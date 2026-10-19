@@ -64,6 +64,7 @@ function saPem(): Promise<string> {
 
 async function resetState() {
   for (const table of [
+    'mount_drive_permissions',
     'upload_batch_nodes', 'upload_batches', 'upload_operations', 'file_readiness',
     'mount_grants', 'mount_read_credentials', 'mounts', 'google_connections',
     'oauth_transactions', 'google_oauth_clients', 'service_accounts', 'user', 'app_settings',
@@ -114,9 +115,9 @@ async function seedWorld(fake: FakeGoogle) {
     .bind(saEnv)
     .run();
   await env.DB.prepare(
-    "INSERT INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES ('mount-1', 'M', ?, 'conn-1', 'conn-1', 1, 'private', 1, 0, 0)",
+    "INSERT INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES ('mount-1', 'M', ?, ?, 'conn-1', 'conn-1', 1, 'private', 1, 0, 0)",
   )
-    .bind(fake.driveId)
+    .bind(fake.driveId, fake.driveId)
     .run();
   await env.DB.prepare(
     "INSERT INTO mount_read_credentials (mount_id, service_account_id, priority, weight, created_at) VALUES ('mount-1', 'sa-1', 1, 1, 0)",

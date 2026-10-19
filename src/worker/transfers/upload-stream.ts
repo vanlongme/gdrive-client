@@ -20,6 +20,7 @@ import {
   decimalBytesFromBigInt,
   decimalBytesToBigInt,
 } from '../../shared/contracts/common';
+import { UPLOAD_QUOTA_EXCEEDED } from './upload-internal';
 import type { UploadDirective, UploadSessionEvent } from './upload-internal';
 
 export type PutChunkDirective = Extract<UploadDirective, { kind: 'put-chunk' }>;
@@ -125,10 +126,12 @@ export function eventForDriveError(err: DriveError): UploadSessionEvent {
       // 404/410: session is dead. 409 on a PUT means the session no longer
       // accepts this range — same recovery path (lookup, then renew).
       return { type: 'chunk-session-expired' };
+    // Owner's My Drive or Shared Drive storage is full (spec 2026-10-18 §4.3).
+    case 'storage-full':
+      return { type: 'chunk-blocked', reason: UPLOAD_QUOTA_EXCEEDED };
     case 'unauthorized':
     case 'permission-denied':
     case 'credential-disabled':
-    case 'storage-full':
       return { type: 'chunk-blocked', reason: err.reason };
     default:
       return { type: 'chunk-outcome-unknown' };
@@ -141,10 +144,12 @@ export function remoteInitOutcomeForError(err: DriveError): {
   reason: string;
 } {
   switch (err.reason) {
+    // Owner's My Drive or Shared Drive storage is full (spec 2026-10-18 §4.3):
+    case 'storage-full':
+      return { kind: 'blocked', reason: UPLOAD_QUOTA_EXCEEDED };
     case 'unauthorized':
     case 'permission-denied':
     case 'credential-disabled':
-    case 'storage-full':
     case 'invalid-request':
     case 'invalid-input':
     case 'precondition-failed':

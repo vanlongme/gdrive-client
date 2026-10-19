@@ -18,10 +18,17 @@ export const MOUNT_OPERATIONS = ['read', 'upload', 'admin'] as const;
 export const MountOperationSchema = z.enum(MOUNT_OPERATIONS);
 export type MountOperationName = z.infer<typeof MountOperationSchema>;
 
+// Mount kind is derived server-side from the stored drive id (spec
+// 2026-10-18 §2.1): a Shared Drive mount, or a folder in the owner's My Drive.
+export const MOUNT_KINDS = ['shared_drive', 'my_drive_folder'] as const;
+export const MountKindSchema = z.enum(MOUNT_KINDS);
+export type MountKindName = z.infer<typeof MountKindSchema>;
+
 // Safe mount shape for end users: no internal connection/SA IDs. rootFolderId
-// is the Shared Drive root — equal to driveId and safe to expose because it
-// is the browse entry point, not a credential. operations lists the actor's
-// permitted operations on this mount so the UI can render honest actions.
+// is the mount's root folder (the stored root_folder_id) and is safe to
+// expose because it is the browse entry point, not a credential. operations
+// lists the actor's permitted operations on this mount so the UI can render
+// honest actions.
 export const MountViewSchema = z
   .object({
     id: IdSchema,
@@ -79,11 +86,15 @@ export const SEARCH_SCOPES = ['folder', 'drive'] as const;
 export const SearchScopeSchema = z.enum(SEARCH_SCOPES);
 export type SearchScope = z.infer<typeof SearchScopeSchema>;
 
+// `partial` is set only on My Drive whole-mount search: results are filtered
+// by containment and bounded (3 Google pages, 50 hits per request), so a
+// short page does not mean the search is finished while nextCursor exists.
 export const SearchPageSchema = z
   .object({
     entries: z.array(DriveFileEntrySchema),
     nextCursor: z.string().min(1).optional(),
     scope: SearchScopeSchema,
+    partial: z.boolean().optional(),
   })
   .strict();
 export type SearchPage = z.infer<typeof SearchPageSchema>;

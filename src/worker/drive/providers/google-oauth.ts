@@ -31,6 +31,7 @@ import {
   parseResumeRangeHeader,
   sendJson,
 } from './common';
+import type { MountScope } from '../containment';
 import {
   oauthTokenIdentity,
   type CoordinatorTokenSource,
@@ -160,14 +161,29 @@ export function createGoogleOAuthProvider(
       : { 'X-Goog-Drive-Resource-Keys': `${ref.id}/${ref.resourceKey}` };
   }
 
+  /**
+   * Shared Drive scope lists the drive (`corpora=drive` + `driveId`). My Drive
+   * scope lists the owner's corpus (`corpora=user`, no `driveId`, no
+   * `includeItemsFromAllDrives`) and keeps `supportsAllDrives=true`; the
+   * caller proves containment for anything it did not list by parent.
+   */
   function listOrSearch(
     writer: ResolvedWriter,
     q: string,
-    driveId: string,
+    scope: MountScope,
     pageToken: string | undefined,
     pageSize: number | undefined,
     signal: AbortSignal | undefined,
   ) {
+    const scopeQuery: Record<string, string | boolean> =
+      scope.driveId === null
+        ? { corpora: 'user', supportsAllDrives: true }
+        : {
+            corpora: 'drive',
+            driveId: validateDriveId(scope.driveId, 'oauth.files.list'),
+            includeItemsFromAllDrives: true,
+            supportsAllDrives: true,
+          };
     return authed(writer, 'oauth.files.list', (bearer) =>
       sendJson(
         transport,
@@ -177,10 +193,7 @@ export function createGoogleOAuthProvider(
           path: '/drive/v3/files',
           query: {
             q,
-            corpora: 'drive',
-            driveId,
-            includeItemsFromAllDrives: true,
-            supportsAllDrives: true,
+            ...scopeQuery,
             fields: FILE_LIST_FIELDS,
             pageSize: clampPageSize(pageSize),
             pageToken,
@@ -248,12 +261,11 @@ export function createGoogleOAuthProvider(
 
     listChildren(input: ListChildrenInput) {
       const parent = validateDriveId(input.parentFolderId, 'oauth.files.list');
-      const driveId = validateDriveId(input.driveId, 'oauth.files.list');
       const q = `'${parent}' in parents and trashed = false`;
       return listOrSearch(
         input.writer,
         q,
-        driveId,
+        input.scope,
         input.pageToken,
         input.pageSize,
         input.signal,
@@ -262,7 +274,6 @@ export function createGoogleOAuthProvider(
 
     async search(input: SearchFilesInput) {
       const operation = 'oauth.files.list';
-      const driveId = validateDriveId(input.driveId, operation);
       const term = input.query.trim();
       if (term === '') {
         throw new DriveError(
@@ -272,7 +283,7 @@ export function createGoogleOAuthProvider(
         );
       }
       let q = `name contains '${escapeDriveQueryTerm(term)}' and trashed = false`;
-      if (input.scope === 'folder') {
+      if (input.searchScope === 'folder') {
         if (input.folderId === undefined) {
           throw new DriveError(
             'invalid-input',
@@ -286,7 +297,7 @@ export function createGoogleOAuthProvider(
       return listOrSearch(
         input.writer,
         q,
-        driveId,
+        input.scope,
         input.pageToken,
         input.pageSize,
         input.signal,

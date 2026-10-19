@@ -14,9 +14,11 @@
  *   - Pagination cursors are opaque AES-GCM tokens (cursors.ts); an expired
  *     or mismatched cursor fails closed and the client restarts cleanly.
  *   - Resource scope is proven, not assumed: folder/file ids resolve through
- *     resolveResource, which verifies driveId === mount.driveId at every
- *     shortcut hop. Out-of-mount ids answer FILE_NOT_ACCESSIBLE, identical
- *     to a missing resource.
+ *     resolveResource, which proves containment (driveId equality on a
+ *     Shared Drive, a cached ancestor walk on a My Drive folder mount) at
+ *     every shortcut hop. A listed parent is proven once; its children are
+ *     contained by construction and are not walked. Out-of-mount ids answer
+ *     FILE_NOT_ACCESSIBLE, identical to a missing resource.
  *   - No public DTO carries connection ids, principal ids, resource keys or
  *     page tokens (spec §10.2).
  */
@@ -44,6 +46,8 @@ import { createGoogleOAuthProvider } from './providers/google-oauth';
 import { CursorError, openCursor, signCursor, type CursorSubject } from './cursors';
 import { validateDriveId } from './transport';
 import { resolveResource, ResourceScopeError } from './shortcuts';
+import { mountKindOf, mountScopeOf } from './containment';
+import { searchMyDriveMount } from './my-drive-search';
 import type {
   CatalogEntry,
   CatalogPage,
@@ -362,7 +366,7 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
             id: mount.id,
             label: mount.label,
             visibility: mount.visibility,
-            rootFolderId: mount.driveId,
+            rootFolderId: mount.rootFolderId,
             operations: sortOperations(access),
           })),
         }),
@@ -398,6 +402,7 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
 
     try {
       const folder = validRouteDriveId(folderId, 'catalog.children');
+      const mountScope = mountScopeOf(mount);
       const writerState = await requireUsableOAuthWriter(
         c.env.DB,
         mount.catalogConnectionId,
@@ -406,10 +411,11 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
       const writer = writerState.writer;
       const provider = oauthProviderFor(c.env);
 
-      // Prove folder scope, following shortcuts inside the drive. The drive
-      // root (folderId === driveId) is implicitly in-mount.
+      // Prove folder scope, following shortcuts inside the mount. The mount
+      // root (folderId === rootFolderId) is implicitly in-mount on both
+      // kinds; every other folder passes containment via resolveResource.
       let resolvedFolderId = folder;
-      if (folder !== mount.driveId) {
+      if (folder !== mountScope.rootFolderId) {
         const resolved = await resolveResource(
           { access, mount, writer, provider },
           { id: folder },
@@ -474,7 +480,7 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
         try {
           page = await provider.listChildren({
             writer,
-            driveId: mount.driveId,
+            scope: mountScope,
             parentFolderId: resolvedFolderId,
             ...(pageToken === undefined ? {} : { pageToken }),
           });
@@ -562,6 +568,12 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
           'folderId is only valid for folder-scoped search.',
         );
       }
+      const mountScope = mountScopeOf(mount);
+      // My Drive whole-mount search is the only filtered/bounded variant:
+      // folder-scoped search runs inside an already-proven folder, and a
+      // Shared Drive search is contained by its corpora.
+      const wholeMountSearch =
+        mountKindOf(mountScope) === 'my_drive_folder' && scope === 'drive';
 
       const writerState = await requireUsableOAuthWriter(
         c.env.DB,
@@ -577,7 +589,7 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
           folderIdParam as string,
           'catalog.search',
         );
-        if (folder === mount.driveId) {
+        if (folder === mountScope.rootFolderId) {
           scopedFolderId = folder;
         } else {
           const resolved = await resolveResource(
@@ -644,16 +656,25 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
       if (page === undefined) {
         const startedMs = Date.now();
         try {
-          page = await provider.search({
-            writer,
-            driveId: mount.driveId,
-            query: q,
-            scope,
-            ...(scopedFolderId === undefined
-              ? {}
-              : { folderId: scopedFolderId }),
-            ...(pageToken === undefined ? {} : { pageToken }),
-          });
+          page = wholeMountSearch
+            ? await searchMyDriveMount({
+                provider,
+                writer,
+                scope: mountScope,
+                query: q,
+                ...(pageToken === undefined ? {} : { pageToken }),
+                signal: c.req.raw.signal,
+              })
+            : await provider.search({
+                writer,
+                scope: mountScope,
+                query: q,
+                searchScope: scope,
+                ...(scopedFolderId === undefined
+                  ? {}
+                  : { folderId: scopedFolderId }),
+                ...(pageToken === undefined ? {} : { pageToken }),
+              });
         } finally {
           recordCatalogQuery('search', Date.now() - startedMs);
         }
@@ -663,6 +684,9 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
       const body = {
         entries: page.entries.map(entryToDto),
         scope,
+        ...(wholeMountSearch && page.nextPageToken !== undefined
+          ? { partial: true }
+          : {}),
         ...(page.nextPageToken === undefined
           ? {}
           : {

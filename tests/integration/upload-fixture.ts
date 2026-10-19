@@ -294,7 +294,7 @@ export async function seedBase() {
     "INSERT OR REPLACE INTO google_connections (id, oauth_client_id, principal_id, display_email, refresh_envelope, granted_scopes, state, enabled, version, connected_by, created_at, updated_at) VALUES ('conn-1', 'client-1', 'perm-1', 'w@test', NULL, '', 'connected', 1, 1, 'admin-1', 0, 0)",
   ).run();
   await env.DB.prepare(
-    "INSERT OR REPLACE INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES ('mount-1', 'M', 'drive-1', 'conn-1', 'conn-1', 1, 'private', 1, 0, 0)",
+    "INSERT OR REPLACE INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES ('mount-1', 'M', 'drive-1', 'drive-1', 'conn-1', 'conn-1', 1, 'private', 1, 0, 0)",
   ).run();
   await env.DB.prepare(
     "INSERT OR REPLACE INTO mount_grants (user_id, mount_id, role, operations, granted_by, created_at, updated_at) VALUES ('user-1', 'mount-1', 'uploader', '[\"read\",\"upload\"]', 'admin-1', 0, 0)",
@@ -305,6 +305,7 @@ export async function resetState() {
   // Children before parents — FK order. `user`/`app_settings` are seeded
   // via INSERT OR REPLACE and left alone (auth tables reference user).
   for (const table of [
+    'mount_drive_permissions',
     'upload_batch_nodes',
     'upload_batches',
     'upload_operations',

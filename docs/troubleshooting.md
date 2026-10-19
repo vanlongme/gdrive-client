@@ -65,10 +65,11 @@ with no dedicated text.
 | `DRIVE_UNAVAILABLE` | 5xx | OAuth-plane upstream failure: transport error, Google 5xx, timeout — also returned `503` for **new** uploads/folders/batches while maintenance mode is draining | Retry with backoff; check diagnostics `oauth.connections` and `maintenance` |
 | `READ_PROVIDER_UNAVAILABLE` | 5xx | SA read pool failing or fully cooling down | `GET /api/v1/admin/provider-health`; re-import a valid SA key; check Shared Drive membership |
 | `FILE_NOT_ACCESSIBLE` | 4xx | OAuth identity got 403/404 on the file — no Shared Drive role, file gone, or file-level restriction | Verify operator membership/role; confirm the file exists for that identity |
-| `FILE_NOT_READABLE_BY_POOL` | 4xx | No SA in the read pool can read the file (membership, download restriction, or not-found for every SA) | Add the SA as Viewer on the Shared Drive; check `file_readiness` reason |
+| `FILE_NOT_READABLE_BY_POOL` | 502 | No SA in the read pool can read the file (membership, download restriction, or not-found for every SA) | Add the SA as Viewer on the Shared Drive; check `file_readiness` reason |
 | `RATE_LIMITED` | 4xx | Drive 429/403 rate class | Honor `retryAfterSeconds`; reduce concurrency; coordinator cooldowns back off automatically |
 | `PROJECT_LIMITED` | 4xx | Google Cloud project quota exhausted (`quotaExceeded` class) — whole-project cooldown | Check project quota in Google Cloud console (no quota numbers are hard-coded here — see the official Drive limits doc) |
-| `STORAGE_FULL` | 4xx | Drive storage quota exhausted | Free space / raise storage; uploads cannot complete |
+| `STORAGE_FULL` | 507 | Drive storage quota exhausted — also the synchronous answer when an upload or folder create hits a full quota | Free space / raise storage; uploads cannot complete |
+| `MOUNT_KIND_UNSUPPORTED` | 409 | `read-grants/sync` or `.../probe` called on a Shared Drive mount | Only My Drive folder mounts have app-managed pool access; for a Shared Drive add the SA as a member in Google Admin |
 | `SNAPSHOT_UNAVAILABLE` | 4xx | Catalog snapshot/signed pagination cursor no longer valid (policy version moved) | Re-list from the root |
 | `CONTENT_CHANGED` | 409 | File revision changed between metadata and body fetch | Re-fetch metadata, then retry the content request |
 | `MEDIA_PACKAGE_NOT_READY` | 4xx/503 | Media package still being assembled | Poll `GET /api/v1/media-packages/:packageId` |
@@ -81,6 +82,7 @@ with no dedicated text.
 | `UPLOAD_EXPIRED` | 4xx | Resumable session URI 404/410 upstream — the session is gone | Let the client renew (lookup→renew chain); an unopenable sealed session is treated the same way |
 | `UPLOAD_NEEDS_RECONCILIATION` | 4xx | Final response lost/aborted — remote outcome uncertain | Reconcile the operation (`POST /api/v1/uploads/:u/reconcile`); do not blindly restart — the idempotent tombstone resolves replays |
 | `FILE_CONFLICT` | 409 | Upstream conflict/precondition (e.g. etag/generation race) | Reload state and re-decide; conflicted operations are terminal |
+| `upload:quota_exceeded` | — | **Not an `error.code`**: it is the `blockReason` on an upload item when Drive answers `storageQuotaExceeded` mid-upload — the quota of the account that owns the destination (a personal account for My Drive folder mounts) is full. A synchronous quota failure is `STORAGE_FULL` (507) instead | Free space or raise storage on the owner account; resume or restart the upload |
 
 During key rotation these maintenance-only results appear inside
 `/admin/maintenance/rotation/*` responses (not the shared `error.code`
@@ -93,6 +95,32 @@ re-keys each live UploadSession DO envelope in place (CAS-guarded
 operation ids — while any session still reports unavailable/unrekeyable.
 Remediation: finish/cancel the operation or let its session renew (a dead
 envelope self-heals via the session-expired → renew path), then retry.
+
+### Mount creation and My Drive folder access
+
+Mount creation rejects an unusable root with HTTP 400 and one of these stable
+codes (messages are localized in the SPA; Google's own text is never returned):
+
+| Code | Cause | Next action |
+| --- | --- | --- |
+| `MOUNT_ROOT_NOT_FOLDER` | The id is a file, a Docs document, or not visible to the connection | Pick a folder (browser) or paste a folder link |
+| `MOUNT_ROOT_NOT_OWNED` | `ownedByMe` is false for the catalog or write connection's account | Use the account that owns the folder |
+| `MOUNT_ROOT_IS_MY_DRIVE` | The id is the account's My Drive root | Choose a folder inside it |
+| `MOUNT_ROOT_TRASHED` | The folder is in the trash | Restore it or choose another |
+| `MOUNT_ROOT_NOT_WRITABLE` | The write connection cannot add children | Check the account's edit access |
+| `MOUNT_WRITER_MISMATCH` | Catalog and write connections are different Google accounts | Use connections for the same account |
+
+Per-service-account results of `POST /api/v1/admin/mounts/:id/read-grants/sync`
+(`grants[].errorCode`) are not HTTP errors:
+
+| Code | Meaning | Next action |
+| --- | --- | --- |
+| `grant:rate_limited` | Google throttled sharing; the account stays pending and `retryAfterSeconds` is returned | Wait; the UI retries on its own, or press **Sync access** later |
+| `grant:forbidden` | The operator may not share this folder | Confirm ownership of the folder |
+| `grant:not_found` | Folder or permission gone | Re-check the mount root in Drive |
+| `grant:invalid_principal` | Google rejected the service account address | Re-import the service account key |
+| `grant:upstream` | Drive 5xx / transport failure | Sync again later |
+| `grant:not_visible` | Result of **Check**: the service account cannot see the folder | Sync access, then Check again |
 
 ## Admin-visible states
 

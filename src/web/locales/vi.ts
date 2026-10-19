@@ -30,10 +30,10 @@ export const vi = {
   errors: {
     authRequired: "Bạn cần đăng nhập để tiếp tục.",
     forbidden:
-      "Bạn không có quyền thực hiện thao tác này. Nếu lỗi đến từ Google, kiểm tra quyền thành viên trên Shared Drive và rằng Drive API đã bật trong project.",
+      "Bạn không có quyền thực hiện thao tác này. Nếu lỗi đến từ Google, kiểm tra quyền truy cập trên Shared Drive hoặc thư mục và rằng Drive API đã bật trong project.",
     rateLimited: "Quá nhiều lần thử. Vui lòng thử lại sau {seconds} giây.",
     validation:
-      "Dữ liệu gửi lên không hợp lệ. Kiểm tra lại các trường — với import credential kiểm tra client ID/secret hoặc JSON key; với mount kiểm tra Shared Drive ID và vai trò ghi — rồi thử lại.",
+      "Dữ liệu gửi lên không hợp lệ. Kiểm tra lại các trường — với import credential kiểm tra client ID/secret hoặc JSON key; với mount kiểm tra ID Shared Drive hoặc thư mục và vai trò ghi — rồi thử lại.",
     setupTokenInvalid: "Mã thiết lập không đúng. Kiểm tra lại SETUP_TOKEN.",
     setupCompleted: "Thiết lập ban đầu đã hoàn tất trước đó.",
     network: "Không kết nối được tới máy chủ. Kiểm tra kết nối và thử lại.",
@@ -42,7 +42,7 @@ export const vi = {
     notFound: "Không tìm thấy tài nguyên. Nó có thể đã bị xóa — tải lại danh sách.",
     driveUnavailable: "Không truy cập được Google Drive lúc này. Thử lại sau; nếu lỗi kéo dài, kiểm tra kết nối Google trong mục Quản trị.",
     fileNotAccessible: "Bạn không có quyền truy cập mục này trên Drive. Kiểm tra quyền mount với quản trị viên.",
-    fileNotReadableByPool: "Tệp hiện không đọc được bằng tài khoản chỉ đọc. Kiểm tra quyền Viewer của service account trên Shared Drive.",
+    fileNotReadableByPool: "Tệp hiện không đọc được bằng tài khoản chỉ đọc. Kiểm tra quyền Viewer của service account trên Shared Drive hoặc thư mục (mount thư mục My Drive: chạy Đồng bộ quyền truy cập trong Quản trị > Mounts).",
     readProviderUnavailable: "Kênh đọc nội dung (service account) chưa sẵn sàng. Kiểm tra SA read pool trong Quản trị.",
     googleReauth:
       "Kết nối Google cần xác thực lại (thiếu refresh token hoặc thiếu Drive scope). Vào Quản trị > Kết nối Google, chọn Kết nối lại và cấp offline access với Drive scope.",
@@ -84,6 +84,22 @@ export const vi = {
       "Lỗi máy chủ không mong đợi. Thử lại; nếu lặp lại, báo quản trị viên kèm mã yêu cầu.",
     unexpectedResponse:
       "Phản hồi từ máy chủ không đúng định dạng. Thử lại hoặc báo quản trị viên.",
+    mountRootNotFolder:
+      "ID đã chọn không phải là thư mục. Hãy chọn một thư mục (hoặc một Shared Drive) rồi thử lại.",
+    mountRootNotOwned:
+      "Thư mục này không thuộc sở hữu của tài khoản Google đã kết nối. Hãy mount một thư mục bạn sở hữu trong My Drive, hoặc gốc của một Shared Drive.",
+    mountRootIsMyDrive:
+      "Không thể mount toàn bộ My Drive. Hãy tạo hoặc chọn một thư mục bên trong.",
+    mountRootTrashed:
+      "Thư mục đang nằm trong thùng rác Drive. Khôi phục nó hoặc chọn thư mục khác.",
+    mountRootNotWritable:
+      "Kết nối ghi không thể thêm tệp vào thư mục này. Kiểm tra quyền Drive của nó rồi thử lại.",
+    mountWriterMismatch:
+      "Kết nối ghi không thấy cùng thư mục. Với thư mục My Drive, hãy dùng kết nối catalog và kết nối ghi của cùng một tài khoản Google.",
+    mountKindUnsupported:
+      "Thao tác này chỉ áp dụng cho mount thư mục My Drive. Thành viên Shared Drive được quản lý trong Google.",
+    uploadQuotaExceeded:
+      "Dung lượng Drive của chủ thư mục đã đầy nên không tải lên được. Giải phóng dung lượng hoặc nâng gói lưu trữ rồi thử lại.",
   },
   nav: {
     explorer: "Explorer",
@@ -133,8 +149,8 @@ export const vi = {
       "Kiểm tra origin, session và khóa mã hóa",
       "Nhập OAuth Web client của Google Cloud (client ID/secret vào vault)",
       "Kết nối tài khoản Google của operator (offline access, kiểm tra scopes)",
-      "Import khóa service account chỉ đọc và cấp quyền Viewer trên Shared Drive",
-      "Chọn Shared Drive và gán connection catalog/write cùng SA read pool",
+      "Import khóa service account chỉ đọc và cấp quyền Viewer trên Shared Drive hoặc thư mục",
+      "Chọn Shared Drive hoặc thư mục My Drive và gán connection catalog/write cùng SA read pool",
       "Kiểm tra listing bằng OAuth và đọc nội dung bằng SA độc lập",
       "Chọn chính sách private/share cho mount",
     ],
@@ -161,7 +177,7 @@ export const vi = {
     pendingBody:
       "Chưa thể duyệt tệp lúc này. Tính năng này đang được chuẩn bị.",
     emptyTitle: "Chưa có Drive nào",
-    emptyBody: "Quản trị viên chưa gán Shared Drive nào cho tài khoản của bạn.",
+    emptyBody: "Quản trị viên chưa gán mount nào cho tài khoản của bạn.",
     loadFailed: "Không tải được danh sách Drive.",
     mountLabel: "Drive",
     breadcrumbs: "Đường dẫn thư mục",
@@ -173,6 +189,8 @@ export const vi = {
     clearSearch: "Xóa tìm kiếm",
     searchResultsTitle: "Kết quả cho “{query}”",
     searchEmpty: "Không có kết quả phù hợp.",
+    searchPartial:
+      "Kết quả tìm kiếm mới chỉ là một phần của mount. Bấm Tải thêm để tìm tiếp.",
     viewLabel: "Kiểu hiển thị",
     viewList: "Danh sách",
     viewGrid: "Lưới",
@@ -283,7 +301,7 @@ export const vi = {
       "Không thể bắt đầu kết nối mới qua client này; connection đang dùng nó vẫn hoạt động cho tới khi cần đổi client.",
     serviceAccountsTitle: "Service account chỉ đọc",
     saIntro:
-      "SA chỉ đọc phục vụ nội dung (download/preview). Cấp quyền Viewer cho email SA trên Shared Drive trong Google Admin.",
+      "SA chỉ đọc phục vụ nội dung (download/preview). Shared Drive: cấp quyền Viewer cho email SA trong Google Admin. Thư mục My Drive: ứng dụng tự cấp (Mounts > Đồng bộ quyền truy cập).",
     saEmpty: "Chưa có service account nào.",
     saEmail: "Email SA",
     saProject: "Project",
@@ -305,7 +323,7 @@ export const vi = {
     saCoolingDown: "Đang cooldown",
     mountsTitle: "Mounts",
     mountsIntro:
-      "Mỗi mount gán một Shared Drive với connection catalog, connection ghi và SA read pool riêng biệt.",
+      "Mỗi mount gán một Shared Drive hoặc một thư mục My Drive với connection catalog, connection ghi và SA read pool riêng biệt.",
     mountsEmpty: "Chưa có mount nào.",
     mountCreateTitle: "Tạo mount",
     mountLabelField: "Tên hiển thị",
@@ -385,12 +403,12 @@ export const vi = {
       "Một connection cần xác thực lại — chọn Kết nối lại trong mục Kết nối Google.",
     onboardStepSa: "Nhập service account chỉ đọc",
     onboardSaBody:
-      "Nhập JSON key của SA, rồi trong Google Admin cấp cho email SA quyền Viewer trên từng Shared Drive. SA không bao giờ cần quyền ghi.",
+      "Nhập JSON key của SA, rồi trong Google Admin cấp cho email SA quyền Viewer trên từng Shared Drive; với mount thư mục My Drive, ứng dụng tự cấp quyền đọc khi bạn đồng bộ quyền truy cập. SA không bao giờ cần quyền ghi.",
     onboardSaDone: "Đã nhập {count} service account.",
     onboardSaPending: "Chưa có service account nào.",
-    onboardStepDrive: "Chọn Shared Drive và gán mapping",
+    onboardStepDrive: "Chọn Shared Drive hoặc thư mục và gán mapping",
     onboardDriveBody:
-      "Chọn drive mà mount bao phủ; catalog và ghi dùng OAuth connection, đọc nội dung dùng SA read pool. Chọn một drive sẽ điền sẵn form mount.",
+      "Chọn Shared Drive hoặc thư mục My Drive mà mount bao phủ; catalog và ghi dùng OAuth connection, đọc nội dung dùng SA read pool. Chọn một Shared Drive sẽ điền sẵn form mount; với thư mục My Drive hãy mở tab Mounts.",
     onboardMountsDone: "Đã cấu hình {count} mount.",
     onboardGoConnections: "Mở Kết nối Google",
     onboardGoSa: "Mở Service account",
@@ -404,6 +422,73 @@ export const vi = {
     drivePicked: "Đã điền form mount với {name}.",
     drivesHint:
       "Chỉ các drive mà tài khoản vận hành này nhìn thấy được liệt kê (useDomainAdminAccess=false).",
+    mountKindTabs: "Nguồn của mount",
+    mountTabMyDrive: "Thư mục My Drive",
+    mountTabSharedDrive: "Shared Drive",
+    mountKind: "Loại",
+    mountRoot: "ID gốc",
+    kindMyDriveFolder: "Thư mục My Drive",
+    kindSharedDrive: "Shared Drive",
+    mountFolderHint:
+      "Mount chỉ bao phủ thư mục này và mọi thứ bên trong. Thư mục phải do chính tài khoản của connection sở hữu và không phải gốc My Drive.",
+    folderBrowserLabel: "Duyệt thư mục My Drive",
+    folderBreadcrumbs: "Đường dẫn thư mục",
+    folderRootName: "My Drive",
+    folderLoading: "Đang tải thư mục…",
+    folderEmpty: "Không có thư mục con nào do bạn sở hữu ở đây.",
+    folderOpen: "Mở",
+    folderUse: "Dùng thư mục này",
+    folderUseCurrent: "Dùng thư mục đang mở",
+    folderRefresh: "Làm mới",
+    folderPicked: "Đã chọn thư mục {name}.",
+    folderPickedLink: "Đã chọn thư mục từ liên kết (ID {id}).",
+    folderHint:
+      "Chỉ liệt kê thư mục do tài khoản này sở hữu. Cần thư mục mới? Tạo trong Google Drive rồi bấm Làm mới.",
+    folderNeedConnection:
+      "Chọn connection catalog trước để duyệt thư mục, hoặc dán liên kết bên dưới.",
+    folderLinkLabel: "Hoặc dán liên kết thư mục Drive",
+    folderLinkHint:
+      "Chấp nhận liên kết drive.google.com/drive/folders/…, open?id=… hoặc chỉ ID thư mục.",
+    folderLinkUse: "Dùng liên kết này",
+    folderLinkInvalid:
+      "Không nhận ra thư mục trong liên kết này. Dán liên kết thư mục từ drive.google.com hoặc chỉ ID thư mục (không dùng liên kết tài liệu Google Docs hay tệp).",
+    onboardFolderHint:
+      "Dùng Gmail cá nhân và chưa có Shared Drive? Mở Mounts rồi chọn tab Thư mục My Drive để gắn một thư mục bạn sở hữu.",
+    readGrantsTitle: "Quyền đọc của pool",
+    readGrantsIntro:
+      "Với thư mục My Drive, ứng dụng tự cấp quyền Viewer trên thư mục gốc cho các service account trong pool (không gửi email thông báo).",
+    readGrantsSummary: "{ready}/{total} service account đã sẵn sàng",
+    readGrantsSync: "Đồng bộ quyền truy cập",
+    readGrantsSyncing: "Đang đồng bộ…",
+    readGrantsRemaining: "Còn {remaining} thao tác.",
+    readGrantsWaiting:
+      "Google đang giới hạn tốc độ chia sẻ. Tự thử lại sau {seconds} giây…",
+    readGrantsDone: "Đồng bộ xong.",
+    readGrantsStalled:
+      "Đồng bộ dừng vì không còn tiến triển. Xem lỗi theo từng service account bên dưới rồi thử lại.",
+    readGrantsNoPool:
+      "Pool đọc đang trống. Chọn service account ở mục Sửa > SA read pool, rồi đồng bộ.",
+    readGrantsFailuresTitle: "Lỗi theo service account",
+    readGrantsChecksTitle: "Kiểm tra từng service account",
+    readGrantsCheck: "Kiểm tra",
+    readGrantsChecking: "Đang kiểm tra…",
+    readGrantsProbeOk: "Nhìn thấy thư mục",
+    readGrantsProbeNotVisible:
+      "Chưa nhìn thấy thư mục. Chạy Đồng bộ quyền truy cập rồi kiểm tra lại.",
+    grantStatePending: "Đang chờ",
+    grantStateGranted: "Đã cấp",
+    grantStateRevoking: "Đang thu hồi",
+    grantStateFailed: "Lỗi",
+    grantErrRateLimited:
+      "Google giới hạn tốc độ chia sẻ — sẽ tự thử lại.",
+    grantErrForbidden:
+      "Tài khoản vận hành không được phép chia sẻ thư mục này.",
+    grantErrNotFound: "Không tìm thấy thư mục hoặc quyền trên Drive.",
+    grantErrInvalidPrincipal:
+      "Google từ chối email của service account này.",
+    grantErrUpstream: "Google Drive lỗi tạm thời. Thử đồng bộ lại sau.",
+    grantErrNotVisible: "Service account chưa nhìn thấy thư mục.",
+    grantErrUnknown: "Lỗi không xác định khi cấp quyền.",
     healthTitle: "Trạng thái dịch vụ",
     healthOk: "API đang hoạt động",
     healthError: "API health báo lỗi",

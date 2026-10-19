@@ -38,16 +38,23 @@ import {
 } from './oauth/transactions';
 import type { PinnedWriter, ReadIdentity, ResolvedWriter } from './types';
 import { DriveError, driveErrorToApiCode } from './errors';
+import { ResourceScopeError } from './containment';
 
 // ---------------------------------------------------------------------------
 // Mount record (mounts table projection; the internal connection ids are
 // server-side — user-facing DTOs are built in contracts/drive.ts).
 // ---------------------------------------------------------------------------
 
+/** Derived from drive_id: NULL means a My Drive folder mount. */
+export type MountKind = 'shared_drive' | 'my_drive_folder';
+
 export interface MountRecord {
   readonly id: string;
   readonly label: string;
-  readonly driveId: string;
+  /** null => My Drive folder mount. */
+  readonly driveId: string | null;
+  /** Shared Drive: equals driveId. */
+  readonly rootFolderId: string;
   readonly catalogConnectionId: string;
   readonly writeConnectionId: string;
   readonly readPoolVersion: number;
@@ -57,10 +64,11 @@ export interface MountRecord {
   readonly updatedAt: number;
 }
 
-interface MountRow {
+export interface MountRow {
   id: string;
   label: string;
-  drive_id: string;
+  drive_id: string | null;
+  root_folder_id: string;
   catalog_connection_id: string;
   write_connection_id: string;
   read_pool_version: number;
@@ -70,15 +78,16 @@ interface MountRow {
   updated_at: number;
 }
 
-const MOUNT_COLUMNS =
-  'id, label, drive_id, catalog_connection_id, write_connection_id, ' +
+export const MOUNT_COLUMNS =
+  'id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, ' +
   'read_pool_version, visibility, policy_version, created_at, updated_at';
 
-function toMountRecord(r: MountRow): MountRecord {
+export function toMountRecord(r: MountRow): MountRecord {
   return {
     id: r.id,
     label: r.label,
     driveId: r.drive_id,
+    rootFolderId: r.root_folder_id,
     catalogConnectionId: r.catalog_connection_id,
     writeConnectionId: r.write_connection_id,
     readPoolVersion: r.read_pool_version,
@@ -131,6 +140,12 @@ export function statusForApiCode(code: ApiErrorCode): number {
   switch (code) {
     case 'VALIDATION_FAILED':
     case 'SETUP_TOKEN_INVALID':
+    case 'MOUNT_ROOT_NOT_FOLDER':
+    case 'MOUNT_ROOT_NOT_OWNED':
+    case 'MOUNT_ROOT_IS_MY_DRIVE':
+    case 'MOUNT_ROOT_TRASHED':
+    case 'MOUNT_ROOT_NOT_WRITABLE':
+    case 'MOUNT_WRITER_MISMATCH':
       return 400;
     case 'AUTH_REQUIRED':
       return 401;
@@ -150,6 +165,7 @@ export function statusForApiCode(code: ApiErrorCode): number {
     case 'CONTENT_CHANGED':
     case 'UPLOAD_EXPIRED':
     case 'UPLOAD_NEEDS_RECONCILIATION':
+    case 'MOUNT_KIND_UNSUPPORTED':
       return 409;
     case 'PREVIEW_UNSUPPORTED':
       return 415;
@@ -564,6 +580,10 @@ export function failureFromError(
   }
   if (err instanceof AuthError) {
     return { status: err.status, code: err.code, message: err.message };
+  }
+  if (err instanceof ResourceScopeError) {
+    // Out-of-mount is indistinguishable from missing (spec §9).
+    return { status: 404, code: 'FILE_NOT_ACCESSIBLE', message: 'The file is not accessible.' };
   }
   if (
     isAuthErrorLike(err) &&

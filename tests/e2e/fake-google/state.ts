@@ -53,8 +53,17 @@ export interface FakeFile {
   name: string;
   mimeType: string;
   parents: string[];
-  /** Owning Shared Drive id (the root folder's driveId is itself). */
-  driveId: string;
+  /**
+   * Owning Shared Drive id (the root folder's driveId is itself). Absent for
+   * My Drive files: Google omits driveId there, and so does the fake.
+   */
+  driveId?: string;
+  /**
+   * My Drive owner (OAuth permissionId). Access to a My Drive file is the
+   * owner OR a permission on the file or any ancestor. Unused for Shared
+   * Drive files, whose access is decided by `FakeState.members`.
+   */
+  ownerPrincipal?: string;
   trashed: boolean;
   headRevisionId?: string;
   md5Checksum?: string;
@@ -79,7 +88,8 @@ export interface FakeUploadSession {
   name: string;
   mimeType: string;
   parents: string[];
-  driveId: string;
+  /** Absent for My Drive uploads. */
+  driveId?: string;
   /** Declared total from X-Upload-Content-Length / Content-Range `*\/N`. */
   declaredTotal?: bigint;
   contentType: string;
@@ -129,6 +139,22 @@ export interface FakeServiceAccount {
 
 export type DriveRole = "reader" | "writer" | "organizer";
 
+/** A direct permission on a My Drive file or folder (user grants only). */
+export interface FakePermission {
+  id: string;
+  type: "user";
+  /** "owner" is synthesized from FakeFile.ownerPrincipal, never stored. */
+  role: "reader" | "writer";
+  emailAddress: string;
+}
+
+/** Injectable sharing throttle: the next `remaining` creates answer 403. */
+export interface FakeSharingRateLimit {
+  remaining: number;
+  /** Sent as a Retry-After header (seconds) when set. */
+  retryAfterSeconds?: number;
+}
+
 export interface FakeState {
   drives: Map<string, FakeDrive>;
   files: Map<string, FakeFile>;
@@ -143,6 +169,12 @@ export interface FakeState {
    * non-members get 404 rather than an existence leak.
    */
   members: Map<string, Map<string, DriveRole>>;
+  /** My Drive: fileId -> direct permissions (inherited by descendants). */
+  permissions: Map<string, FakePermission[]>;
+  /** My Drive: owner principal -> that account's root folder id. */
+  myDriveRoots: Map<string, string>;
+  /** `sharingRateLimitExceeded` injection for permissions.create. */
+  sharingRateLimitExceeded: FakeSharingRateLimit;
 }
 
 export function createFakeState(): FakeState {
@@ -155,5 +187,8 @@ export function createFakeState(): FakeState {
     authCodes: new Map(),
     serviceAccounts: new Map(),
     members: new Map(),
+    permissions: new Map(),
+    myDriveRoots: new Map(),
+    sharingRateLimitExceeded: { remaining: 0 },
   };
 }

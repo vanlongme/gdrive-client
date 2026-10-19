@@ -37,6 +37,7 @@ import {
   resolveActor,
   type ResolveActorFn,
 } from '../drive/mounts';
+import { mountScopeOf } from '../drive/containment';
 import { createCoordinatorTokenSource } from '../drive/coordinator-client';
 import { createGoogleOAuthProvider } from '../drive/providers/google-oauth';
 import type { OAuthCatalogWriteProvider } from '../drive/types';
@@ -294,7 +295,7 @@ export function createBatchRouter(deps: BatchRouterDeps = {}) {
         provider: provider(c.env),
         writer: pinned,
         parentId: input.rootParentId,
-        driveId: mount.driveId,
+        mountScope: mountScopeOf(mount),
         signal: c.req.raw.signal,
       });
       if (!dest.ok) {

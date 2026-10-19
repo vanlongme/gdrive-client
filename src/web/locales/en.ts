@@ -30,10 +30,10 @@ export const en: Messages = {
   errors: {
     authRequired: "You need to sign in to continue.",
     forbidden:
-      "You do not have permission to perform this action. If the failure came from Google, check membership on the Shared Drive and that the Drive API is enabled in the project.",
+      "You do not have permission to perform this action. If the failure came from Google, check access to the Shared Drive or folder and that the Drive API is enabled in the project.",
     rateLimited: "Too many attempts. Please try again in {seconds} seconds.",
     validation:
-      "The submitted data is invalid. Check the fields — for credential imports verify the client ID/secret or the pasted key JSON; for mounts check the Shared Drive ID and write role — and try again.",
+      "The submitted data is invalid. Check the fields — for credential imports verify the client ID/secret or the pasted key JSON; for mounts check the Shared Drive or folder ID and write role — and try again.",
     setupTokenInvalid: "The setup token is incorrect. Check SETUP_TOKEN.",
     setupCompleted: "Initial setup has already completed.",
     network: "Could not reach the server. Check your connection and retry.",
@@ -42,7 +42,7 @@ export const en: Messages = {
     notFound: "The resource was not found. It may have been removed — reload the list.",
     driveUnavailable: "Google Drive is unreachable right now. Retry shortly; if it persists, check the Google connection under Admin.",
     fileNotAccessible: "You cannot access this item on Drive. Check your mount grant with an administrator.",
-    fileNotReadableByPool: "This file is not readable by the read-only account. Check the service account's Viewer membership on the Shared Drive.",
+    fileNotReadableByPool: "This file is not readable by the read-only account. Check the service account's Viewer access to the Shared Drive or folder (My Drive folder mounts: run Sync access under Admin > Mounts).",
     readProviderUnavailable: "The content-read channel (service account) is not ready. Check the SA read pool under Admin.",
     googleReauth:
       "The Google connection needs re-authentication (missing refresh token or Drive scope). Go to Admin > Google connections, choose Reconnect and grant offline Drive access.",
@@ -82,6 +82,22 @@ export const en: Messages = {
       "An unexpected server error occurred. Retry; if it repeats, report it with the request ID.",
     unexpectedResponse:
       "The server response was not in the expected format. Retry or contact an administrator.",
+    mountRootNotFolder:
+      "The chosen ID is not a folder. Pick a folder (or a Shared Drive) and try again.",
+    mountRootNotOwned:
+      "The folder is not owned by the connected Google account. Mount a folder you own in My Drive, or a Shared Drive root.",
+    mountRootIsMyDrive:
+      "The whole My Drive cannot be mounted. Create or choose a folder inside it.",
+    mountRootTrashed:
+      "The folder is in the Drive trash. Restore it or choose another folder.",
+    mountRootNotWritable:
+      "The write connection cannot add files to this folder. Check its Drive access and try again.",
+    mountWriterMismatch:
+      "The write connection does not see the same folder. For a My Drive folder, use catalog and write connections of the same Google account.",
+    mountKindUnsupported:
+      "This operation applies to My Drive folder mounts only. Shared Drive membership is managed in Google.",
+    uploadQuotaExceeded:
+      "The folder owner's Drive storage is full, so the upload cannot complete. Free up space or upgrade storage, then retry.",
   },
   nav: {
     explorer: "Explorer",
@@ -130,8 +146,8 @@ export const en: Messages = {
       "Verify origin, session and encryption keys",
       "Register the Google Cloud OAuth Web client (client ID/secret into the vault)",
       "Connect the operator Google account (offline access, scope checks)",
-      "Import read-only service account keys and grant Viewer on the Shared Drive",
-      "Choose the Shared Drive and assign catalog/write connections and the SA read pool",
+      "Import read-only service account keys and grant Viewer on the Shared Drive or folder",
+      "Choose the Shared Drive or My Drive folder and assign catalog/write connections and the SA read pool",
       "Verify listing over OAuth and content reads over SA independently",
       "Choose the private/share policy for the mount",
     ],
@@ -157,7 +173,7 @@ export const en: Messages = {
     pendingTitle: "File browsing is not available yet",
     pendingBody: "Files cannot be browsed right now. This feature is being prepared.",
     emptyTitle: "No Drive yet",
-    emptyBody: "An admin has not assigned any Shared Drive to your account.",
+    emptyBody: "An admin has not assigned any mount to your account.",
     loadFailed: "Could not load the Drive list.",
     mountLabel: "Drive",
     breadcrumbs: "Folder path",
@@ -169,6 +185,8 @@ export const en: Messages = {
     clearSearch: "Clear search",
     searchResultsTitle: "Results for “{query}”",
     searchEmpty: "No matching results.",
+    searchPartial:
+      "These search results cover only part of the mount. Press Load more to keep searching.",
     viewLabel: "View",
     viewList: "List",
     viewGrid: "Grid",
@@ -279,7 +297,7 @@ export const en: Messages = {
       "New connections can no longer start through this client; connections already using it keep working until they need a different client.",
     serviceAccountsTitle: "Read-only service accounts",
     saIntro:
-      "Read-only SAs serve content (download/preview). Grant the SA email Viewer on the Shared Drive in Google Admin.",
+      "Read-only SAs serve content (download/preview). Shared Drive: grant the SA email Viewer in Google Admin. My Drive folder: the app grants it for you (Mounts > Sync access).",
     saEmpty: "No service accounts yet.",
     saEmail: "SA email",
     saProject: "Project",
@@ -301,7 +319,7 @@ export const en: Messages = {
     saCoolingDown: "Cooling down",
     mountsTitle: "Mounts",
     mountsIntro:
-      "Each mount maps one Shared Drive to a catalog connection, a write connection and a separate SA read pool.",
+      "Each mount maps one Shared Drive or one My Drive folder to a catalog connection, a write connection and a separate SA read pool.",
     mountsEmpty: "No mounts yet.",
     mountCreateTitle: "Create mount",
     mountLabelField: "Display label",
@@ -381,12 +399,12 @@ export const en: Messages = {
       "A connection needs re-authentication — choose Reconnect under Google connections.",
     onboardStepSa: "Import a read-only service account",
     onboardSaBody:
-      "Import the SA key JSON, then grant the SA email Viewer membership on each Shared Drive in Google Admin. The SA never needs write rights.",
+      "Import the SA key JSON, then grant the SA email Viewer membership on each Shared Drive in Google Admin; for a My Drive folder mount the app grants read access itself when you sync access. The SA never needs write rights.",
     onboardSaDone: "{count} service account(s) imported.",
     onboardSaPending: "No service account yet.",
-    onboardStepDrive: "Choose the Shared Drive and assign the mapping",
+    onboardStepDrive: "Choose the Shared Drive or folder and assign the mapping",
     onboardDriveBody:
-      "Pick the drive the mount covers; catalog and writes use OAuth connections, content reads use the SA pool. Choosing a drive fills the mount form.",
+      "Pick the Shared Drive or My Drive folder the mount covers; catalog and writes use OAuth connections, content reads use the SA pool. Choosing a Shared Drive fills the mount form; for a My Drive folder open the Mounts tab.",
     onboardMountsDone: "{count} mount(s) configured.",
     onboardGoConnections: "Open Google connections",
     onboardGoSa: "Open service accounts",
@@ -400,6 +418,72 @@ export const en: Messages = {
     drivePicked: "Filled the mount form with {name}.",
     drivesHint:
       "Only drives this operator account can see are listed (useDomainAdminAccess=false).",
+    mountKindTabs: "Mount source",
+    mountTabMyDrive: "My Drive folder",
+    mountTabSharedDrive: "Shared Drive",
+    mountKind: "Kind",
+    mountRoot: "Root ID",
+    kindMyDriveFolder: "My Drive folder",
+    kindSharedDrive: "Shared Drive",
+    mountFolderHint:
+      "The mount covers only this folder and everything inside it. The folder must be owned by the connection's own account and cannot be the My Drive root.",
+    folderBrowserLabel: "Browse My Drive folders",
+    folderBreadcrumbs: "Folder path",
+    folderRootName: "My Drive",
+    folderLoading: "Loading folders…",
+    folderEmpty: "No sub-folders that you own here.",
+    folderOpen: "Open",
+    folderUse: "Use this folder",
+    folderUseCurrent: "Use the open folder",
+    folderRefresh: "Refresh",
+    folderPicked: "Selected folder {name}.",
+    folderPickedLink: "Selected the folder from the link (ID {id}).",
+    folderHint:
+      "Only folders owned by this account are listed. Need a new folder? Create it in Google Drive, then press Refresh.",
+    folderNeedConnection:
+      "Pick a catalog connection first to browse folders, or paste a link below.",
+    folderLinkLabel: "Or paste a Drive folder link",
+    folderLinkHint:
+      "Accepts drive.google.com/drive/folders/… links, open?id=… links or a bare folder ID.",
+    folderLinkUse: "Use this link",
+    folderLinkInvalid:
+      "No folder recognised in this link. Paste a folder link from drive.google.com or a bare folder ID (Google Docs document and file links do not work).",
+    onboardFolderHint:
+      "Using a personal Gmail account with no Shared Drive? Open Mounts and choose the My Drive folder tab to mount a folder you own.",
+    readGrantsTitle: "Pool read access",
+    readGrantsIntro:
+      "For a My Drive folder the app grants Viewer on the root folder to the service accounts in the pool itself (no notification e-mail).",
+    readGrantsSummary: "{ready}/{total} service accounts ready",
+    readGrantsSync: "Sync access",
+    readGrantsSyncing: "Syncing…",
+    readGrantsRemaining: "{remaining} operations remaining.",
+    readGrantsWaiting:
+      "Google is rate limiting sharing. Retrying automatically in {seconds} s…",
+    readGrantsDone: "Sync finished.",
+    readGrantsStalled:
+      "Sync stopped because it is no longer making progress. See the per-account errors below, then try again.",
+    readGrantsNoPool:
+      "The read pool is empty. Choose service accounts under Edit > SA read pool, then sync.",
+    readGrantsFailuresTitle: "Errors per service account",
+    readGrantsChecksTitle: "Check each service account",
+    readGrantsCheck: "Check",
+    readGrantsChecking: "Checking…",
+    readGrantsProbeOk: "Can see the folder",
+    readGrantsProbeNotVisible:
+      "Cannot see the folder yet. Run Sync access, then check again.",
+    grantStatePending: "Pending",
+    grantStateGranted: "Granted",
+    grantStateRevoking: "Revoking",
+    grantStateFailed: "Failed",
+    grantErrRateLimited:
+      "Google is rate limiting sharing — it will retry automatically.",
+    grantErrForbidden: "The operator account may not share this folder.",
+    grantErrNotFound: "The folder or permission was not found on Drive.",
+    grantErrInvalidPrincipal:
+      "Google rejected this service account's e-mail address.",
+    grantErrUpstream: "Google Drive had a temporary error. Sync again later.",
+    grantErrNotVisible: "The service account cannot see the folder yet.",
+    grantErrUnknown: "Unknown error while granting access.",
     healthTitle: "Service status",
     healthOk: "API is healthy",
     healthError: "API health reported an error",

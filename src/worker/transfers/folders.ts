@@ -250,7 +250,7 @@ export function createFolderRouter(deps: FolderRouterDeps = {}) {
       }
 
       const stub = stubFor(c.env, operation.id);
-      const pinned = pinnedFromRow(operation, mount.driveId);
+      const pinned = pinnedFromRow(operation, mount);
       const res = await doCommand(stub, '/initialize', {
         uploadId: operation.id,
         ownerId: operation.owner_id,

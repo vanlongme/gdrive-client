@@ -118,6 +118,7 @@ function testApp(testEnv: TestEnv = env as TestEnv) {
 async function resetState() {
   // Dependents first — FK references run child → parent.
   for (const table of [
+    'mount_drive_permissions',
     'mount_grants', 'mount_read_credentials', 'file_readiness',
     'upload_batch_nodes', 'upload_operations', 'upload_batches',
     'audit_events', 'share_links',
@@ -471,7 +472,7 @@ describe('retention cleanup', () => {
     await seedConnRows();
     await env.DB
       .prepare(
-        "INSERT OR IGNORE INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES ('m-1','M','d-1','conn-1','conn-1',1,'private',1,0,0)",
+        "INSERT OR IGNORE INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES ('m-1','M','d-1','d-1','conn-1','conn-1',1,'private',1,0,0)",
       )
       .run();
     await env.DB
@@ -558,14 +559,15 @@ describe('retention cleanup', () => {
     await seedConnRows();
     await env.DB
       .prepare(
-        "INSERT OR IGNORE INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES ('m-1','M','d-1','conn-1','conn-1',1,'private',1,0,0)",
+        "INSERT OR IGNORE INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES ('m-1','M','d-1','d-1','conn-1','conn-1',1,'private',1,0,0)",
       )
       .run();
     const claim = await claimOperation(env.DB, {
       ownerId: owner, kind: 'file', idempotencyKey: 'idem-1', input,
       pinned: {
         connectionId: 'conn-1', principalId: 'perm-1', oauthClientId: 'cli-1',
-        projectId: 'proj-1', connectionVersion: 1, oauthClientVersion: 1, driveId: 'd-1',
+        projectId: 'proj-1', connectionVersion: 1, oauthClientVersion: 1,
+        mountScope: { mountId: 'm-1', rootFolderId: 'd-1', driveId: 'd-1' },
       },
       now: Date.now(),
     });
@@ -597,7 +599,7 @@ describe('retention cleanup', () => {
     await seedConnRows();
     await env.DB
       .prepare(
-        "INSERT OR IGNORE INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES ('m-1','M','d-1','conn-1','conn-1',1,'private',1,0,0)",
+        "INSERT OR IGNORE INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, read_pool_version, visibility, policy_version, created_at, updated_at) VALUES ('m-1','M','d-1','d-1','conn-1','conn-1',1,'private',1,0,0)",
       )
       .run();
     const claim = await claimOperation(env.DB, {
@@ -608,7 +610,8 @@ describe('retention cleanup', () => {
       },
       pinned: {
         connectionId: 'conn-1', principalId: 'perm-1', oauthClientId: 'cli-1',
-        projectId: 'proj-1', connectionVersion: 1, oauthClientVersion: 1, driveId: 'd-1',
+        projectId: 'proj-1', connectionVersion: 1, oauthClientVersion: 1,
+        mountScope: { mountId: 'm-1', rootFolderId: 'd-1', driveId: 'd-1' },
       },
       now: Date.now(),
     });
@@ -620,7 +623,8 @@ describe('retention cleanup', () => {
       state: state as UploadSessionSnapshot['state'], initPhase: 'done',
       pinned: {
         connectionId: 'conn-1', principalId: 'perm-1', oauthClientId: 'cli-1',
-        projectId: 'proj-1', connectionVersion: 1, oauthClientVersion: 1, driveId: 'd-1',
+        projectId: 'proj-1', connectionVersion: 1, oauthClientVersion: 1,
+        mountScope: { mountId: 'm-1', rootFolderId: 'd-1', driveId: 'd-1' },
       },
       sessionGeneration: 1, confirmedOffset: '1', chunkSize: 8 * 1024 * 1024,
       hasSessionUri: false, remoteInitAttempted: true, sessionExpired: false,

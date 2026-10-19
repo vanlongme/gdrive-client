@@ -13,8 +13,11 @@ import {
   grantDriveMembership,
   journeySetup,
   journeySignIn,
+  listPermissions,
   mintAuthCode,
   registerFakeServiceAccount,
+  seedMyDriveFile,
+  seedMyDriveFolder,
 } from "./journey-helpers";
 
 /**
@@ -51,6 +54,8 @@ let uploaderState: Awaited<ReturnType<APIRequestContext["storageState"]>>;
 let connectionId = "";
 let mountId = "";
 let uploadedFileId = "";
+let saRowId = "";
+let uploaderId = "";
 
 async function adminApi(request: APIRequest): Promise<APIRequestContext> {
   return request.newContext({
@@ -111,7 +116,7 @@ test("journey: setup -> connect -> mount -> upload -> blocked -> fixed -> downlo
     headers: JOURNEY_HEADERS,
   });
   expect(sa.status(), `sa import ${await sa.text()}`).toBe(200);
-  const saRowId = (
+  saRowId = (
     (await sa.json()) as { serviceAccount: { id: string } }
   ).serviceAccount.id;
 
@@ -169,7 +174,7 @@ test("journey: setup -> connect -> mount -> upload -> blocked -> fixed -> downlo
   expect([200, 201], `user create ${await user.text()}`).toContain(
     user.status(),
   );
-  const uploaderId = (
+  uploaderId = (
     (await user.json()) as { user: { id: string } }
   ).user.id;
   const grant = await admin.post(`/api/v1/admin/mounts/${mountId}/grants`, {
@@ -373,4 +378,161 @@ test("negative: fake detects a provider violation (SA token on a write surface)"
     ),
   ).toBe(true);
   await ctrl.dispose();
+});
+
+const MD_FOLDER = "journey-md-folder-1";
+const MD_FILE = "journey-md-file-1";
+const MD_CONTENT = "my-drive journey bytes — nội dung ✓";
+const MD_UPLOAD = "journey-md-upload.txt";
+const MD_UPLOAD_CONTENT = `My Drive upload ${"y".repeat(3000)} ✓`;
+
+test("journey (My Drive): folder mount -> pool sync -> stream -> upload", async ({
+  browser,
+  playwright,
+}) => {
+  expect(connectionId, "connection from the first journey test").not.toBe("");
+  expect(uploaderId, "uploader from the first journey test").not.toBe("");
+  const admin = await adminApi(playwright.request);
+  const baselineSeq = (await fakeRequests(admin)).reduce(
+    (max, request) => Math.max(max, request.seq),
+    0,
+  );
+  const owner = "perm-fake-operator";
+  await seedMyDriveFolder(admin, "Journey My Drive Folder", {
+    id: MD_FOLDER,
+    ownerPrincipal: owner,
+  });
+  await seedMyDriveFile(admin, "journey-md-clip.txt", {
+    id: MD_FILE,
+    ownerPrincipal: owner,
+    parentId: MD_FOLDER,
+    text: MD_CONTENT,
+  });
+
+  // Folder mount through the real validateMountTargets path.
+  const created = await admin.post("/api/v1/admin/mounts", {
+    data: {
+      label: "Journey My Drive Mount",
+      rootFolderId: MD_FOLDER,
+      catalogConnectionId: connectionId,
+      writeConnectionId: connectionId,
+      serviceAccountIds: [saRowId],
+      visibility: "private",
+    },
+    headers: JOURNEY_HEADERS,
+  });
+  expect(created.status(), `mount create ${await created.text()}`).toBe(200);
+  const mount = ((await created.json()) as {
+    mount: {
+      id: string;
+      kind: string;
+      driveId: string | null;
+      rootFolderId: string;
+    };
+  }).mount;
+  expect(mount).toMatchObject({
+    kind: "my_drive_folder",
+    driveId: null,
+    rootFolderId: MD_FOLDER,
+  });
+  const base = `/api/v1/mounts/${mount.id}`;
+
+  // Pool sync until remaining = 0 (the SPA runs the same loop).
+  let remaining = 1;
+  for (let round = 0; round < 10 && remaining > 0; round += 1) {
+    const sync = await admin.post(
+      `/api/v1/admin/mounts/${mount.id}/read-grants/sync`,
+      { data: {}, headers: JOURNEY_HEADERS },
+    );
+    expect(sync.status(), `sync ${await sync.text()}`).toBe(200);
+    remaining = ((await sync.json()) as { remaining: number }).remaining;
+  }
+  expect(remaining).toBe(0);
+  expect(
+    (await listPermissions(admin, MD_FOLDER)).some(
+      (permission) =>
+        permission.emailAddress === SA_EMAIL && permission.role === "reader",
+    ),
+  ).toBe(true);
+
+  // Stream through the SA with no per-file membership step.
+  const ready = await admin.post(`${base}/files/${MD_FILE}/readiness`, {
+    data: {},
+    headers: JOURNEY_HEADERS,
+  });
+  expect(
+    ((await ready.json()) as { readerAccessState: string }).readerAccessState,
+  ).toBe("readable");
+  const streamed = await admin.get(`${base}/files/${MD_FILE}/content`);
+  expect(streamed.status()).toBe(200);
+  expect((await streamed.body()).toString("utf8")).toBe(MD_CONTENT);
+
+  // Upload into the folder through the real browser as the uploader.
+  const grant = await admin.post(`/api/v1/admin/mounts/${mount.id}/grants`, {
+    data: { userId: uploaderId, role: "uploader" },
+    headers: JOURNEY_HEADERS,
+  });
+  expect(grant.status(), `grant ${await grant.text()}`).toBe(200);
+  const uploaderCtx = await browser.newContext({ storageState: uploaderState });
+  const upage = await uploaderCtx.newPage();
+  await upage.goto("/explorer");
+  await expect(
+    upage.getByRole("heading", { name: "Explorer" }),
+  ).toBeVisible({ timeout: 15_000 });
+  await upage
+    .locator("#mount-select")
+    .selectOption({ label: "Journey My Drive Mount" });
+  await upage.setInputFiles('[data-testid="upload-input"]', {
+    name: MD_UPLOAD,
+    mimeType: "text/plain",
+    buffer: Buffer.from(MD_UPLOAD_CONTENT, "utf8"),
+  });
+  const drawer = upage.getByTestId("transfer-drawer");
+  await expect(drawer.getByText(MD_UPLOAD)).toBeVisible();
+  await expect(drawer.getByText("Hoàn tất")).toBeVisible({ timeout: 30_000 });
+
+  const uploaded = (await fakeState(admin)).files.find(
+    (file) => file.name === MD_UPLOAD,
+  );
+  expect(uploaded?.sha256).toBe(
+    createHash("sha256").update(MD_UPLOAD_CONTENT).digest("hex"),
+  );
+  expect(uploaded?.parents).toEqual([MD_FOLDER]);
+  expect(uploaded?.driveId ?? null).toBeNull();
+  const uploadedId = uploaded?.id ?? "";
+  const ready2 = await admin.post(`${base}/files/${uploadedId}/readiness`, {
+    data: {},
+    headers: JOURNEY_HEADERS,
+  });
+  expect(
+    ((await ready2.json()) as { readerAccessState: string }).readerAccessState,
+  ).toBe("readable");
+  const back = await upage.request.get(`${base}/files/${uploadedId}/content`);
+  expect((await back.body()).toString("utf8")).toBe(MD_UPLOAD_CONTENT);
+
+  // Provider split for everything this scenario did.
+  const log = (await fakeRequests(admin)).filter(
+    (request) => request.seq > baselineSeq,
+  );
+  expect(
+    log.filter((request) => request.providerViolation !== undefined),
+  ).toHaveLength(0);
+  const permissionCalls = log.filter((request) =>
+    request.operation.startsWith("permissions."),
+  );
+  expect(permissionCalls.length).toBeGreaterThan(0);
+  for (const request of permissionCalls) expect(request.provider).toBe("oauth");
+  for (const request of log.filter((entry) =>
+    ["files.create", "files.update", "upload.start", "upload.chunk/probe"].includes(
+      entry.operation,
+    ),
+  )) {
+    expect(request.provider).toBe("oauth");
+  }
+  const reads = log.filter((request) => request.operation === "files.media");
+  expect(reads.length).toBeGreaterThan(0);
+  for (const request of reads) expect(request.provider).toBe("service_account");
+
+  await uploaderCtx.close();
+  await admin.dispose();
 });

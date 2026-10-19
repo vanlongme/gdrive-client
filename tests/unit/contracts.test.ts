@@ -24,6 +24,7 @@ import {
   OAuthClientViewSchema,
   PreviewDescriptorSchema,
   ReadinessViewSchema,
+  SearchPageSchema,
   ServiceAccountViewSchema,
   SetReadPoolRequestSchema,
   SetupStatusViewSchema,
@@ -242,6 +243,12 @@ describe('ApiErrorBody', () => {
       'SETUP_STATUS_UNAVAILABLE',
       'SETUP_NOT_IMPLEMENTED',
       'AUTH_NOT_IMPLEMENTED',
+      'MOUNT_ROOT_NOT_FOLDER',
+      'MOUNT_ROOT_NOT_OWNED',
+      'MOUNT_ROOT_IS_MY_DRIVE',
+      'MOUNT_ROOT_TRASHED',
+      'MOUNT_ROOT_NOT_WRITABLE',
+      'MOUNT_WRITER_MISMATCH',
     ]) {
       expect(API_ERROR_CODES).toContain(code);
     }
@@ -318,6 +325,8 @@ describe('admin DTOs never carry secrets or internal identity', () => {
       MountAdminViewSchema.safeParse({
         id: 'm1',
         label: 'Team drive',
+        kind: 'shared_drive',
+        rootFolderId: '0ALxx',
         driveId: '0ALxx',
         catalogConnectionId: 'c1',
         writeConnectionId: 'c1',
@@ -577,10 +586,40 @@ describe('wave-3 mount/admin contracts', () => {
     expect(minimal.visibility).toBe('private');
   });
 
+  it('CreateMountRequest folds the legacy driveId alias into rootFolderId', () => {
+    const base = { label: 'Family', catalogConnectionId: 'c1', writeConnectionId: 'c1' };
+    expect(CreateMountRequestSchema.parse({ ...base, rootFolderId: '1Folder' }).rootFolderId).toBe('1Folder');
+    const legacy = CreateMountRequestSchema.parse({ ...base, driveId: '0ALxx' });
+    expect(legacy.rootFolderId).toBe('0ALxx');
+    expect('driveId' in legacy).toBe(false);
+    expect(CreateMountRequestSchema.parse({ ...base, rootFolderId: '0ALxx', driveId: '0ALxx' }).rootFolderId).toBe('0ALxx');
+    expectReject(CreateMountRequestSchema, { ...base, rootFolderId: '1Folder', driveId: '0ALxx' });
+    expectReject(CreateMountRequestSchema, base);
+    expectReject(CreateMountRequestSchema, { ...base, rootFolderId: '' });
+    expectReject(CreateMountRequestSchema, { ...base, rootFolderId: '1Folder', kind: 'shared_drive' });
+  });
+
+  it('MountAdminView carries kind, rootFolderId, nullable driveId and optional readGrants', () => {
+    const view = {
+      id: 'm2', label: 'Family', kind: 'my_drive_folder', rootFolderId: '1Folder', driveId: null,
+      catalogConnectionId: 'c1', writeConnectionId: 'c1', readPoolVersion: 1, visibility: 'private',
+      policyVersion: 1, readPool: [], readGrants: { ready: 3, total: 90 },
+    };
+    expect(MountAdminViewSchema.safeParse(view).success).toBe(true);
+    const { readGrants: _omit, ...withoutGrants } = view;
+    expect(MountAdminViewSchema.safeParse(withoutGrants).success).toBe(true);
+    expectReject(MountAdminViewSchema, { ...view, kind: 'team_drive' });
+    expectReject(MountAdminViewSchema, { ...view, rootFolderId: undefined });
+    expectReject(MountAdminViewSchema, { ...view, readGrants: { ready: -1, total: 1 } });
+    expectReject(MountAdminViewSchema, { ...view, readGrants: { ready: 1, total: 1, x: 1 } });
+  });
+
   it('UpdateMountRequest only accepts declared mount fields', () => {
     expect(UpdateMountRequestSchema.safeParse({ label: 'x' }).success).toBe(true);
     expect(UpdateMountRequestSchema.safeParse({}).success).toBe(true);
     expectReject(UpdateMountRequestSchema, { driveId: 'other' });
+    expectReject(UpdateMountRequestSchema, { rootFolderId: 'other' });
+    expectReject(UpdateMountRequestSchema, { kind: 'my_drive_folder' });
   });
 
   it('SetReadPoolRequest validates entry shapes', () => {
@@ -646,5 +685,15 @@ describe('wave-3 mount/admin contracts', () => {
       password: 'long-enough-password',
       role: 'superadmin',
     });
+  });
+});
+
+describe('SearchPageSchema partial flag', () => {
+  it('accepts partial and still rejects unknown keys', () => {
+    expect(
+      SearchPageSchema.parse({ entries: [], scope: 'drive', nextCursor: 'v1.x', partial: true }).partial,
+    ).toBe(true);
+    expect(SearchPageSchema.safeParse({ entries: [], scope: 'drive' }).success).toBe(true);
+    expect(SearchPageSchema.safeParse({ entries: [], scope: 'drive', nextPageToken: 'x' }).success).toBe(false);
   });
 });

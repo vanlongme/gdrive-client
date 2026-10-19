@@ -17,13 +17,16 @@ import type {
   DriveFileMeta,
   DriveRevisionMeta,
   ExportDocumentInput,
+  GetMetadataInput,
   GetRevisionInput,
+  OAuthCatalogWriteProvider,
   OpenContentInput,
   OpenThumbnailInput,
   ReadMetadataInput,
   ServiceAccountContentReadProvider,
   UpstreamContent,
 } from '../../src/worker/drive/types';
+import { resetContainmentCacheForTests } from '../../src/worker/drive/containment';
 import type { Actor } from '../../src/worker/auth/grants';
 import type { AuthUser } from '../../src/worker/auth/session';
 import { createContentRouter } from '../../src/worker/transfers/download';
@@ -70,6 +73,7 @@ const publicActor: Actor = { kind: 'public' };
 
 async function resetState() {
   for (const table of [
+    'mount_drive_permissions',
     'audit_events',
     'file_readiness',
     'share_links',
@@ -117,7 +121,7 @@ async function seedBase(
     .bind(NOW, NOW)
     .run();
   await env.DB.prepare(
-    "INSERT INTO mounts (id, label, drive_id, catalog_connection_id, write_connection_id, visibility, created_at, updated_at) VALUES ('m-1', 'Mount', 'drive-1', 'conn-1', 'conn-1', ?, ?, ?)",
+    "INSERT INTO mounts (id, label, drive_id, root_folder_id, catalog_connection_id, write_connection_id, visibility, created_at, updated_at) VALUES ('m-1', 'Mount', 'drive-1', 'drive-1', 'conn-1', 'conn-1', ?, ?, ?)",
   )
     .bind(visibility, NOW, NOW)
     .run();
@@ -300,13 +304,18 @@ interface Harness {
 
 function makeHarness(
   actor: Actor,
-  options: { provider?: FakeReadProvider; now?: () => number } = {},
+  options: {
+    provider?: FakeReadProvider;
+    now?: () => number;
+    oauth?: OAuthCatalogWriteProvider;
+  } = {},
 ): Harness {
   const provider = options.provider ?? new FakeReadProvider();
   const deps: ContentRouteDeps = {
     getMount,
     resolveSessionActor: () => Promise.resolve(actor),
     readProvider: provider,
+    ...(options.oauth === undefined ? {} : { oauthProvider: options.oauth }),
     ...(options.now === undefined ? { now: () => NOW } : { now: options.now }),
   };
   const shareDeps: ShareRouterDeps = {
@@ -343,6 +352,7 @@ function contentCalls(provider: FakeReadProvider): ProviderCall[] {
 
 beforeEach(async () => {
   await applyD1Migrations(env.DB, TEST_MIGRATIONS);
+  resetContainmentCacheForTests();
   await resetState();
 });
 
@@ -1106,5 +1116,256 @@ describe('reviewer fixes', () => {
       .bind('m-1', 'f-1')
       .first<{ reader_access_state: string }>();
     expect(row?.reader_access_state).toBe('pending');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// My Drive folder mounts (wave 7): the SA reads bytes, but containment is
+// proven ONLY through the OAuth catalog connection (spec section 3).
+// ---------------------------------------------------------------------------
+
+const MY_ROOT = 'MyRootFolder01';
+
+/** Catalog-side fixture: serves ancestor metadata; has no content method by construction. */
+class FakeCatalogProvider implements OAuthCatalogWriteProvider {
+  readonly metadataCalls: GetMetadataInput[] = [];
+  metas = new Map<string, DriveFileMeta>();
+  failure: DriveError | null = null;
+
+  async getMetadata(input: GetMetadataInput): Promise<DriveFileMeta> {
+    this.metadataCalls.push(input);
+    if (this.failure !== null) throw this.failure;
+    const found = this.metas.get(input.ref.id);
+    if (found === undefined) {
+      throw new DriveError('not-found', `${input.ref.id} not found`, { status: 404 });
+    }
+    return found;
+  }
+
+  listChildren(): never {
+    throw new DriveError('operation-not-allowed', 'containment-only fixture');
+  }
+  search(): never {
+    throw new DriveError('operation-not-allowed', 'containment-only fixture');
+  }
+  generateId(): never {
+    throw new DriveError('operation-not-allowed', 'containment-only fixture');
+  }
+  createFolder(): never {
+    throw new DriveError('operation-not-allowed', 'containment-only fixture');
+  }
+  startUpload(): never {
+    throw new DriveError('operation-not-allowed', 'containment-only fixture');
+  }
+  putChunk(): never {
+    throw new DriveError('operation-not-allowed', 'containment-only fixture');
+  }
+  probeUpload(): never {
+    throw new DriveError('operation-not-allowed', 'containment-only fixture');
+  }
+  verifyFile(): never {
+    throw new DriveError('operation-not-allowed', 'containment-only fixture');
+  }
+  trashFile(): never {
+    throw new DriveError('operation-not-allowed', 'containment-only fixture');
+  }
+}
+
+/** Same file as FILE_META but as My Drive reports it: no driveId, one parent. */
+function myFileMeta(overrides: Partial<DriveFileMeta> = {}): DriveFileMeta {
+  const { driveId, ...rest } = FILE_META;
+  void driveId;
+  return { ...rest, parents: ['dirA'], ...overrides };
+}
+
+function folderMeta(id: string, parents: string[]): DriveFileMeta {
+  return {
+    id,
+    name: id,
+    mimeType: 'application/vnd.google-apps.folder',
+    trashed: false,
+    parents,
+    hasThumbnail: false,
+  };
+}
+
+async function convertMountToMyDrive() {
+  await env.DB.prepare(
+    "UPDATE mounts SET drive_id = NULL, root_folder_id = ? WHERE id = 'm-1'",
+  )
+    .bind(MY_ROOT)
+    .run();
+}
+
+async function errorOf(res: Response) {
+  const body = (await res.json()) as { error: { code: string; message: string } };
+  return { status: res.status, code: body.error.code, message: body.error.message };
+}
+
+describe('My Drive folder mount: content containment', () => {
+  it('streams an in-tree file through the SA; containment comes from the OAuth catalog connection', async () => {
+    await seedBase();
+    await convertMountToMyDrive();
+    const catalog = new FakeCatalogProvider();
+    catalog.metas.set('dirA', folderMeta('dirA', [MY_ROOT]));
+    const { app, provider } = makeHarness(userActor(adminUser), { oauth: catalog });
+    provider.metaHandler = () => myFileMeta();
+    provider.contentHandler = () => bytesUpstream('hello from my drive!!!!!!');
+
+    const res = await api(app, CONTENT);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('hello from my drive!!!!!!');
+    // Bytes and metadata came from the SA; ancestors from the catalog writer.
+    expect(provider.calls.slice(0, 2).map((c) => c.op)).toEqual(['meta', 'content']);
+    expect(catalog.metadataCalls.map((c) => c.ref.id)).toContain('dirA');
+    expect(catalog.metadataCalls[0]!.writer.connectionId).toBe('conn-1');
+  });
+
+  it('needs no ancestor lookup for a direct child of the mount root', async () => {
+    await seedBase();
+    await convertMountToMyDrive();
+    const catalog = new FakeCatalogProvider();
+    const { app, provider } = makeHarness(userActor(adminUser), { oauth: catalog });
+    provider.metaHandler = () => myFileMeta({ parents: [MY_ROOT] });
+    provider.contentHandler = () => bytesUpstream('x');
+    const res = await api(app, CONTENT);
+    expect(res.status).toBe(200);
+    expect(catalog.metadataCalls).toHaveLength(0);
+  });
+
+  it('denies a file shared with the SA but outside the tree, exactly like an outside-the-drive file (Review Focus #2)', async () => {
+    // Baseline: the existing Shared Drive refusal.
+    await seedBase();
+    const shared = makeHarness(userActor(adminUser));
+    shared.provider.metaHandler = () => defaultMeta({ driveId: 'drive-OTHER' });
+    shared.provider.contentHandler = () => bytesUpstream('x');
+    const baseline = await errorOf(await api(shared.app, CONTENT));
+    expect(baseline.status).toBe(404);
+    expect(baseline.code).toBe('FILE_NOT_ACCESSIBLE');
+
+    const scenarios: Array<{ name: string; meta: DriveFileMeta; setup: (c: FakeCatalogProvider) => void }> = [
+      {
+        name: 'parent unknown to the catalog connection',
+        meta: myFileMeta({ parents: ['strangerDir'] }),
+        setup: () => undefined,
+      },
+      {
+        name: 'SA sees no parent at all',
+        meta: (() => {
+          const { parents, ...rest } = myFileMeta();
+          void parents;
+          return rest;
+        })(),
+        setup: () => undefined,
+      },
+      {
+        name: 'chain ends in a folder outside the mount',
+        meta: myFileMeta({ parents: ['strangerDir'] }),
+        setup: (c) => c.metas.set('strangerDir', folderMeta('strangerDir', [])),
+      },
+      {
+        name: 'a Shared Drive file reported under a My Drive mount',
+        meta: myFileMeta({ parents: [MY_ROOT], driveId: 'drive-OTHER' }),
+        setup: () => undefined,
+      },
+    ];
+    for (const scenario of scenarios) {
+      await resetState();
+      await seedBase();
+      await convertMountToMyDrive();
+      resetContainmentCacheForTests();
+      const catalog = new FakeCatalogProvider();
+      scenario.setup(catalog);
+      const { app, provider } = makeHarness(userActor(adminUser), { oauth: catalog });
+      provider.metaHandler = () => scenario.meta;
+      provider.contentHandler = () => bytesUpstream('SHOULD-NOT-LEAK');
+      const res = await api(app, CONTENT);
+      const got = await errorOf(res);
+      expect(got, scenario.name).toEqual(baseline);
+      expect(contentCalls(provider), scenario.name).toHaveLength(0);
+    }
+  });
+
+  it('applies the same denial to thumbnails and records the probe as blocked', async () => {
+    await seedBase();
+    await convertMountToMyDrive();
+    const catalog = new FakeCatalogProvider();
+    const { app, provider } = makeHarness(userActor(adminUser), { oauth: catalog });
+    provider.metaHandler = () => myFileMeta({ parents: ['strangerDir'] });
+    provider.thumbnailHandler = () => bytesUpstream('PNG', { contentType: 'image/png' });
+
+    const thumb = await api(app, '/api/v1/mounts/m-1/files/f-1/thumbnail');
+    expect(thumb.status).toBe(404);
+    expect((await errorOf(thumb)).code).toBe('FILE_NOT_ACCESSIBLE');
+    expect(provider.calls.some((c) => c.op === 'thumbnail')).toBe(false);
+
+    const probe = await api(app, '/api/v1/mounts/m-1/files/f-1/readiness', { method: 'POST' });
+    expect(probe.status).toBe(200);
+    expect(((await probe.json()) as { readerAccessState: string }).readerAccessState).toBe('blocked');
+  });
+
+  it('denies when the containment lookup fails upstream; no fallback, no bytes', async () => {
+    await seedBase();
+    await convertMountToMyDrive();
+    const catalog = new FakeCatalogProvider();
+    catalog.failure = new DriveError('upstream-unavailable', 'catalog is down: boom');
+    const { app, provider } = makeHarness(userActor(adminUser), { oauth: catalog });
+    provider.metaHandler = () => myFileMeta();
+    provider.contentHandler = () => bytesUpstream('SHOULD-NOT-LEAK');
+
+    const res = await api(app, CONTENT);
+    expect(res.status).toBe(502);
+    expect(JSON.stringify(await res.json())).not.toContain('boom');
+    expect(contentCalls(provider)).toHaveLength(0);
+    // The failed proof is inconclusive, never "readable".
+    const probe = await api(app, '/api/v1/mounts/m-1/files/f-1/readiness', { method: 'POST' });
+    expect(((await probe.json()) as { readerAccessState: string }).readerAccessState).not.toBe('readable');
+  });
+
+  it('denies when the catalog connection is disabled, without reading bytes', async () => {
+    await seedBase();
+    await convertMountToMyDrive();
+    await env.DB.prepare(
+      "UPDATE google_connections SET enabled = 0, state = 'disabled' WHERE id = 'conn-1'",
+    ).run();
+    const catalog = new FakeCatalogProvider();
+    const { app, provider } = makeHarness(userActor(adminUser), { oauth: catalog });
+    provider.metaHandler = () => myFileMeta();
+    provider.contentHandler = () => bytesUpstream('SHOULD-NOT-LEAK');
+    const res = await api(app, CONTENT);
+    expect(res.status).toBe(502);
+    expect(contentCalls(provider)).toHaveLength(0);
+    expect(catalog.metadataCalls).toHaveLength(0);
+  });
+
+  it('still refuses trashed files and missing download capability on My Drive', async () => {
+    for (const meta of [
+      myFileMeta({ trashed: true }),
+      myFileMeta({ capabilities: { canDownload: false, canReadRevisions: true } }),
+    ]) {
+      await resetState();
+      await seedBase();
+      await convertMountToMyDrive();
+      resetContainmentCacheForTests();
+      const catalog = new FakeCatalogProvider();
+      catalog.metas.set('dirA', folderMeta('dirA', [MY_ROOT]));
+      const { app, provider } = makeHarness(userActor(adminUser), { oauth: catalog });
+      provider.metaHandler = () => meta;
+      provider.contentHandler = () => bytesUpstream('x');
+      const res = await api(app, CONTENT);
+      expect([404, 502]).toContain(res.status);
+      expect(contentCalls(provider)).toHaveLength(0);
+    }
+  });
+
+  it('never consults the catalog connection for a Shared Drive mount', async () => {
+    await seedBase();
+    const catalog = new FakeCatalogProvider();
+    const { app, provider } = makeHarness(userActor(adminUser), { oauth: catalog });
+    provider.metaHandler = () => defaultMeta();
+    provider.contentHandler = () => bytesUpstream('shared drive body.......');
+    const res = await api(app, CONTENT);
+    expect(res.status).toBe(200);
+    expect(catalog.metadataCalls).toHaveLength(0);
   });
 });

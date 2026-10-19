@@ -3,3 +3,4 @@ export * from './drive';
 export * from './uploads';
 export * from './media';
 export * from './admin';
+export * from './read-grants';
