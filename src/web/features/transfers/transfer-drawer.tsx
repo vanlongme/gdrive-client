@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router";
 import { useI18n } from "../../lib/i18n";
+import { MinusIcon, PlusIcon } from "../../components/icons";
 import { FolderBatchCard } from "./transfer-folder-item";
 import { TransferItem } from "./transfer-item";
 import { useFolderBatches, useTransferSnapshot } from "./use-transfers";
@@ -46,7 +47,7 @@ export function TransferDrawer() {
           }
           onClick={() => setOpen((prev) => !prev)}
         >
-          {open ? "−" : "+"}
+          {open ? <MinusIcon /> : <PlusIcon />}
         </button>
       </div>
       {open ? (

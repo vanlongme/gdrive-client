@@ -100,6 +100,18 @@ export function messageKeyForError(error: unknown): {
       return { key: "errors.mountWriterMismatch", ...base };
     case "MOUNT_KIND_UNSUPPORTED":
       return { key: "errors.mountKindUnsupported", ...base };
+    // Wave-8 public-link codes: mapped to the closest existing message until
+    // worker C adds dedicated strings (C6 owns the locale files).
+    case "PUBLIC_LINK_EXPIRED":
+      return { key: "errors.notFound", ...base };
+    case "PUBLIC_LINK_PASSWORD_REQUIRED":
+    case "PUBLIC_LINK_INVALID_PASSWORD":
+    case "PUBLIC_LINK_ARCHIVE_DISABLED":
+      return { key: "errors.forbidden", ...base };
+    case "PUBLIC_LINK_CONFLICT":
+      return { key: "errors.fileConflict", ...base };
+    case "PUBLIC_LINK_TOO_LARGE":
+      return { key: "errors.validation", ...base };
     default:
       return { key: "errors.unknown", ...base };
   }

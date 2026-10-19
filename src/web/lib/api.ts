@@ -26,6 +26,13 @@ import {
   type CreateShareResponse,
   type ShareListResponse,
 } from "../../shared/contracts/media";
+import { SiteBrandingViewSchema, type SiteBrandingView } from "../../shared/contracts/site";
+import {
+  PublicChildrenPageSchema,
+  PublicFolderMetaSchema,
+  type PublicChildrenPage,
+  type PublicFolderMeta,
+} from "../../shared/contracts/public-links";
 
 /**
  * Client-side failure for any non-2xx API response or network error. `code`
@@ -369,4 +376,79 @@ export function getHealth(): Promise<{ status: string }> {
   return apiFetch("/api/v1/health").then((res) =>
     parseJson(res, z.looseObject({ status: z.string() })),
   );
+}
+
+// --- Site branding (wave-8 anonymous surface; answers pre-setup too) ---
+
+/** GET /api/v1/site — the server answers the bare SiteBrandingView. */
+export function getSite(signal?: AbortSignal): Promise<SiteBrandingView> {
+  return apiFetch("/api/v1/site", { signal }).then((res) =>
+    parseJson(res, SiteBrandingViewSchema),
+  );
+}
+
+// --- Public folder links (wave-8 anonymous surface under /api/v1/p) ---
+// These endpoints run no session lookup; the browser attaches the MACed
+// path-scoped unlock cookie automatically when the link is locked.
+
+function publicBase(slug: string): string {
+  return `/api/v1/p/${enc(slug)}`;
+}
+
+/** GET /api/v1/p/:slug — meta + view counter; `locked` means password set. */
+export function getPublicFolderMeta(
+  slug: string,
+  signal?: AbortSignal,
+): Promise<PublicFolderMeta> {
+  return apiFetch(publicBase(slug), { signal }).then((res) =>
+    parseJson(res, PublicFolderMetaSchema),
+  );
+}
+
+/** GET /api/v1/p/:slug/children — descendant listing, shortcuts hidden. */
+export function listPublicChildren(
+  slug: string,
+  params?: { folderId?: string; pageToken?: string },
+  signal?: AbortSignal,
+): Promise<PublicChildrenPage> {
+  const query = new URLSearchParams();
+  if (params?.folderId !== undefined) query.set("folderId", params.folderId);
+  if (params?.pageToken !== undefined)
+    query.set("pageToken", params.pageToken);
+  const suffix = query.size > 0 ? `?${query.toString()}` : "";
+  return apiFetch(`${publicBase(slug)}/children${suffix}`, { signal }).then(
+    (res) => parseJson(res, PublicChildrenPageSchema),
+  );
+}
+
+/** POST /api/v1/p/:slug/unlock — 204 + HttpOnly path-scoped cookie. */
+export function unlockPublicLink(
+  slug: string,
+  password: string,
+): Promise<void> {
+  return apiFetch(`${publicBase(slug)}/unlock`, {
+    method: "POST",
+    jsonBody: { password },
+  }).then(() => undefined);
+}
+
+/**
+ * Direct content URL for anchor downloads and <img>/<media> sources: the
+ * browser sends the path-scoped unlock cookie on this same-origin GET and
+ * the server streams the SA-read body. download=1 sets attachment
+ * disposition and counts the download server-side.
+ */
+export function publicContentUrl(
+  slug: string,
+  fileId: string,
+  download = false,
+): string {
+  const base = `${publicBase(slug)}/files/${enc(fileId)}/content`;
+  return download ? `${base}?download=1` : base;
+}
+
+/** GET /api/v1/p/:slug/archive — streaming STORE zip of a folder subtree. */
+export function publicArchiveUrl(slug: string, folderId?: string): string {
+  const base = `${publicBase(slug)}/archive`;
+  return folderId === undefined ? base : `${base}?folderId=${enc(folderId)}`;
 }

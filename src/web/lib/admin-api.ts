@@ -25,6 +25,18 @@ import {
   type ReadGrantProbeResponse,
   type ReadGrantsSyncResponse,
 } from "../../shared/contracts/read-grants";
+import {
+  PublicLinkListResponseSchema,
+  PublicLinkResponseSchema,
+  type CreatePublicLinkRequest,
+  type PublicFolderLinkView,
+  type UpdatePublicLinkRequest,
+} from "../../shared/contracts/public-links";
+import {
+  SiteBrandingViewSchema,
+  type SiteBrandingView,
+  type UpdateSiteBrandingRequest,
+} from "../../shared/contracts/site";
 import { z } from "zod";
 import { apiFetch, parseJson } from "./api";
 
@@ -542,4 +554,73 @@ export function rotationAbort() {
   }).then((res) =>
     parseJson(res, z.looseObject({ aborted: z.boolean() })),
   );
+}
+
+// --- Site branding (wave-8 admin surface) ---------------------------------
+// Every mutation answers the fresh bare SiteBrandingView so callers can
+// re-render the shell brand immediately after a save.
+
+export function updateSiteBranding(
+  body: UpdateSiteBrandingRequest,
+): Promise<SiteBrandingView> {
+  return apiFetch("/api/v1/admin/site", {
+    method: "PUT",
+    jsonBody: body,
+  }).then((res) => parseJson(res, SiteBrandingViewSchema));
+}
+
+/**
+ * Logo upload is a raw-body PUT (png/webp/svg ≤512 KiB — the server enforces
+ * the same cap while streaming; the client checks first for a fast answer).
+ */
+export function uploadSiteLogo(file: File): Promise<SiteBrandingView> {
+  return apiFetch("/api/v1/admin/site/logo", {
+    method: "PUT",
+    headers: { "Content-Type": file.type },
+    body: file,
+  }).then((res) => parseJson(res, SiteBrandingViewSchema));
+}
+
+export function deleteSiteLogo(): Promise<SiteBrandingView> {
+  return apiFetch("/api/v1/admin/site/logo", { method: "DELETE" }).then(
+    (res) => parseJson(res, SiteBrandingViewSchema),
+  );
+}
+
+// --- Public folder links (wave-8 admin lifecycle) -------------------------
+
+export type { PublicFolderLinkView } from "../../shared/contracts/public-links";
+
+export function listPublicLinks(
+  mountId?: string,
+  signal?: AbortSignal,
+): Promise<PublicFolderLinkView[]> {
+  const query =
+    mountId === undefined ? "" : `?mountId=${encodeURIComponent(mountId)}`;
+  return apiFetch(`/api/v1/public-links${query}`, { signal }).then((res) =>
+    parseJson(res, PublicLinkListResponseSchema).then((body) => body.links),
+  );
+}
+
+export function createPublicLink(body: CreatePublicLinkRequest) {
+  return apiFetch("/api/v1/public-links", {
+    method: "POST",
+    jsonBody: body,
+  }).then((res) => parseJson(res, PublicLinkResponseSchema));
+}
+
+export function updatePublicLink(
+  id: string,
+  body: UpdatePublicLinkRequest,
+) {
+  return apiFetch(`/api/v1/public-links/${enc(id)}`, {
+    method: "PATCH",
+    jsonBody: body,
+  }).then((res) => parseJson(res, PublicLinkResponseSchema));
+}
+
+export function revokePublicLink(id: string) {
+  return apiFetch(`/api/v1/public-links/${enc(id)}`, {
+    method: "DELETE",
+  }).then((res) => parseJson(res, PublicLinkResponseSchema));
 }

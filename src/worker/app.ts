@@ -31,6 +31,9 @@ import { createUploadRouter } from "./transfers/upload-routes";
 import { createBatchRouter } from "./transfers/batches";
 import { createFolderRouter } from "./transfers/folders";
 import { createPackageRouter } from "./media/package-routes";
+import { createSiteAdminRouter, createSiteRouter } from "./site/routes";
+import { createPublicLinkAdminRouter } from "./public-links/admin-routes";
+import { createPublicLinkRouter } from "./public-links/public-routes";
 
 /**
  * Worker-first API surface (T01 foundation, T03 setup/auth).
@@ -61,6 +64,8 @@ const PROTECTED_API_PREFIXES = [
   "/api/v1/folders",
   "/api/v1/media-packages",
   "/api/v1/shares",
+  "/api/v1/public-links",
+  "/api/v1/p",
   "/api/v1/admin",
   "/api/v1/session",
   "/api/auth",
@@ -138,6 +143,22 @@ export function createApp() {
     c.set("requestId", crypto.randomUUID());
     await next();
     applyApiSecurityHeaders(c);
+    const path = c.req.path;
+    // Anonymous public-link surface: never indexable, never cached.
+    if (path === "/api/v1/p" || path.startsWith("/api/v1/p/")) {
+      c.header("X-Robots-Tag", "noindex");
+    }
+    // The site logo is the one cacheable API response: restore the short
+    // shared cache the global no-store overwrote, plus the SVG sandbox CSP.
+    if (path === "/api/v1/site/logo") {
+      c.header("Cache-Control", "public, max-age=300");
+      if (c.res.headers.get("content-type") === "image/svg+xml") {
+        c.header(
+          "Content-Security-Policy",
+          "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+        );
+      }
+    }
   });
 
   // Bootstrap secrets gate: every known API surface except liveness fails
@@ -260,6 +281,16 @@ export function createApp() {
   app.route("/api/v1/upload-batches", createBatchRouter());
   app.route("/api/v1/folders", createFolderRouter());
   app.route("/api/v1/media-packages", createPackageRouter());
+
+  // Wave-8 Phase B: /api/v1/site answers before setup (unprotected prefix,
+  // defaults when the row is absent); /api/v1/p requires completed setup via
+  // the gate above but runs no session check — the public routes ignore
+  // session cookies by construction. Admin surfaces mount under the
+  // existing /api/v1/admin + /api/v1/public-links protected prefixes.
+  app.route("/api/v1/site", createSiteRouter());
+  app.route("/api/v1/p", createPublicLinkRouter());
+  app.route("/api/v1/public-links", createPublicLinkAdminRouter());
+  app.route("/api/v1/admin", createSiteAdminRouter());
 
   app.notFound((c) => {
     if (isApiPath(c.req.path)) return apiError(c, 404, "NOT_FOUND", "Not found.");

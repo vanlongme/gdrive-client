@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  blob,
   check,
   foreignKey,
   index,
@@ -638,6 +639,89 @@ export const maintenanceState = sqliteTable(
     completedAt: integer('completed_at', { mode: 'timestamp_ms' }),
   },
   (t) => [check('maintenance_state_singleton_ck', sql`${t.id} = 1`)],
+);
+
+// ---------------------------------------------------------------------------
+// Wave 8 (migration 0008): site branding singleton + public folder links.
+// ---------------------------------------------------------------------------
+
+// Operator-supplied site identity served by GET /api/v1/site (anonymous,
+// works before setup). logo_data is the raw uploaded bytes (PNG/WebP/SVG,
+// <=512 KiB enforced at upload); logo_version drives the ?v= cache key.
+export const siteBranding = sqliteTable(
+  'site_branding',
+  {
+    id: integer('id').primaryKey(),
+    title: text('title').notNull().default('Drive Worker'),
+    tagline: text('tagline').notNull().default(''),
+    welcome: text('welcome').notNull().default(''),
+    supportEmail: text('support_email'),
+    logoMime: text('logo_mime'),
+    logoData: blob('logo_data', { mode: 'buffer' }),
+    logoVersion: integer('logo_version').notNull().default(0),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedBy: text('updated_by').references(() => users.id),
+  },
+  (t) => [check('site_branding_singleton_ck', sql`${t.id} = 1`)],
+);
+
+export const PUBLIC_LINK_STATUSES = [
+  'active',
+  'expired',
+  'revoked',
+  'invalidated',
+] as const;
+export type PublicLinkStatus = (typeof PUBLIC_LINK_STATUSES)[number];
+
+// Anonymous folder links (/api/v1/p/<slug>). password_hash is a PHC-style
+// pbkdf2-sha256 record or NULL; credential_version invalidates unlock
+// cookies; policy_version pins the mount policy at creation. At most one
+// non-revoked link per (mount, folder) via the partial unique index.
+export const publicFolderLinks = sqliteTable(
+  'public_folder_links',
+  {
+    id: text('id').primaryKey(),
+    slug: text('slug').notNull().unique(),
+    mountId: text('mount_id')
+      .notNull()
+      .references(() => mounts.id),
+    folderId: text('folder_id').notNull(),
+    folderName: text('folder_name').notNull(),
+    passwordHash: text('password_hash'),
+    credentialVersion: integer('credential_version').notNull().default(1),
+    allowZip: integer('allow_zip', { mode: 'boolean' }).notNull().default(false),
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }),
+    policyVersion: integer('policy_version').notNull(),
+    createdBy: text('created_by')
+      .notNull()
+      .references(() => users.id),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+    revokedAt: integer('revoked_at', { mode: 'timestamp_ms' }),
+    viewCount: integer('view_count').notNull().default(0),
+    downloadCount: integer('download_count').notNull().default(0),
+  },
+  (t) => [
+    index('public_folder_links_mount_folder_idx').on(t.mountId, t.folderId),
+    uniqueIndex('public_folder_links_active_folder_uq')
+      .on(t.mountId, t.folderId)
+      .where(sql`${t.revokedAt} is null`),
+  ],
+);
+
+// Unlock-failure throttle keyed by SHA-256('v1'|slug|client-IP); the raw IP
+// is never persisted. A row exists only after a first failure.
+export const publicLinkUnlockAttempts = sqliteTable(
+  'public_link_unlock_attempts',
+  {
+    key: text('key').primaryKey(),
+    failures: integer('failures').notNull(),
+    windowStartedAt: integer('window_started_at', { mode: 'timestamp_ms' }).notNull(),
+    lockedUntil: integer('locked_until', { mode: 'timestamp_ms' }),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  // The unlock-time prune deletes by updated_at (review R2c).
+  (t) => [index('public_link_unlock_attempts_updated_idx').on(t.updatedAt)],
 );
 
 // One-use owner recovery tokens; only the SHA-256 hash is stored.

@@ -1,5 +1,6 @@
 import { useRef } from "react";
 import { useI18n, type MessagePath } from "../../lib/i18n";
+import { FileIcon, FolderIcon } from "../../components/icons";
 import { getFolderUploader } from "./folder-runtime";
 import type { FolderBatchItem, FolderBatchState } from "./folder-upload";
 import type { FolderUploadFileInput } from "./folder-upload";
@@ -99,7 +100,7 @@ export function FolderBatchCard({ batch }: { batch: FolderBatchItem }) {
               style={{ paddingInlineStart: `${node.depth * 16 + 4}px` }}
             >
               <span className="folder-node-icon" aria-hidden="true">
-                {node.kind === "folder" ? "📁" : "📄"}
+                {node.kind === "folder" ? <FolderIcon /> : <FileIcon />}
               </span>
               <span className="folder-node-name">{node.displayName}</span>
               <span className={`badge badge-sm ${NODE_STATE_BADGE[node.state]}`}>

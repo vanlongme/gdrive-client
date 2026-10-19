@@ -2,8 +2,10 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router";
 import { ApiClientError } from "../../lib/api";
+import { BrandBlock } from "../../components/brand";
 import { useI18n } from "../../lib/i18n";
 import { useSession } from "../../lib/session";
+import { useSite, useDocumentTitle } from "../../lib/site";
 import { useSetupStatus } from "../../lib/setup-status";
 
 interface LocationState {
@@ -14,8 +16,10 @@ interface LocationState {
 /** Email/password sign-in through Better Auth (spec section 9.3). */
 export function LoginPage() {
   const { t } = useI18n();
+  useDocumentTitle(t("auth.signInTitle"));
   const { state: setup } = useSetupStatus();
   const { state: session, signIn } = useSession();
+  const { site } = useSite();
   const navigate = useNavigate();
   const location = useLocation();
   const locationState = (location.state ?? {}) as LocationState;
@@ -73,13 +77,11 @@ export function LoginPage() {
 
   return (
     <main className="auth-layout">
-      <div className="card auth-panel">
-        <div className="brand">
-          <span>{t("app.name")}</span>
-          <span className="tagline">{t("app.tagline")}</span>
-        </div>
+      <div className="auth-stack">
+        <BrandBlock detail="tagline" className="auth-brand" />
+        <div className="card auth-panel">
         <h1>{t("auth.signInTitle")}</h1>
-        <p>{t("auth.signInIntro")}</p>
+        <p>{site.welcome !== "" ? site.welcome : t("auth.signInIntro")}</p>
 
         {locationState.setupComplete === true ? (
           <p className="alert alert-success">{t("auth.setupCompleteBanner")}</p>
@@ -124,6 +126,7 @@ export function LoginPage() {
             {submitting ? t("auth.submitting") : t("auth.submit")}
           </button>
         </form>
+        </div>
       </div>
     </main>
   );

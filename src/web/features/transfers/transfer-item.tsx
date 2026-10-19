@@ -24,6 +24,19 @@ const STATE_KEYS: Record<TransferItemView["state"], MessagePath> = {
   error: "transfers.stateError",
 };
 
+/* Status is dot + word: the badge variant only picks the dot/tint. */
+const STATE_BADGE: Record<TransferItemView["state"], string> = {
+  queued: "badge-muted",
+  preparing: "badge-accent",
+  sending: "badge-accent",
+  confirming: "badge-accent",
+  paused: "badge-muted",
+  "needs-reselect": "badge-caution",
+  completed: "badge-success",
+  cancelled: "badge-muted",
+  error: "badge-error",
+};
+
 function percent(done: string, total: string): number {
   try {
     const t = BigInt(total);
@@ -52,7 +65,9 @@ export function TransferItem({ item }: { item: TransferItemView }) {
     <li className="transfer-item" data-state={item.state}>
       <div className="transfer-item-head">
         <span className="transfer-name">{item.name}</span>
-        <span className="badge">{t(STATE_KEYS[item.state])}</span>
+        <span className={`badge ${STATE_BADGE[item.state]}`}>
+          {t(STATE_KEYS[item.state])}
+        </span>
       </div>
       <div
         className="transfer-progress"

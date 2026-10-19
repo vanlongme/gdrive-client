@@ -56,7 +56,7 @@ export function ConfirmAction({
         <button
           type="button"
           ref={confirmRef}
-          className={`btn btn-sm ${danger ? "btn-danger" : "btn-primary"}`}
+          className={`btn btn-sm ${danger ? "btn-danger-solid" : "btn-primary"}`}
           disabled={busy}
           onClick={() => {
             setArmed(false);

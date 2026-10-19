@@ -23,8 +23,19 @@ import {
   type MountViewClient,
 } from "../../lib/api";
 import { messageKeyForError } from "../../lib/error-message";
+import {
+  FileIcon,
+  FolderIcon,
+  GlobeIcon,
+  ShortcutIcon,
+  XIcon,
+} from "../../components/icons";
+import { listPublicLinks } from "../../lib/admin-api";
+import type { PublicFolderLinkView } from "../../../shared/contracts/public-links";
+import { SharePublicDialog } from "./share-public-dialog";
 import { formatBytes, formatDateTime } from "../../lib/format";
 import { useI18n } from "../../lib/i18n";
+import { useDocumentTitle } from "../../lib/site";
 import { useSession } from "../../lib/session";
 import { PreviewLauncher } from "../preview/preview-launcher";
 import {
@@ -143,14 +154,22 @@ function kindLabel(
   return t("explorer.kindFile");
 }
 
-function kindIcon(entry: DriveFileEntry): string {
-  if (entry.kind === "folder") return "📁";
-  if (entry.kind === "shortcut") return "↗";
-  return "📄";
+function EntryKindIcon({ entry }: { entry: DriveFileEntry }) {
+  if (entry.kind === "folder") {
+    return <FolderIcon className="entry-icon entry-icon-folder" />;
+  }
+  if (entry.kind === "shortcut") {
+    return <ShortcutIcon className="entry-icon" />;
+  }
+  return <FileIcon className="entry-icon" />;
 }
 
 export function ExplorerPage() {
   const { t, locale } = useI18n();
+  useDocumentTitle(t("explorer.title"));
+  const { state: sessionState } = useSession();
+  const isAdmin =
+    sessionState.status === "signedIn" && sessionState.user.role === "admin";
 
   // --- Mount list ---
   type MountsState =
@@ -206,6 +225,15 @@ export function ExplorerPage() {
     | { status: "error"; id: string; error: unknown }
     | null
   >(null);
+  // Public folder links (wave-8 C3): admin-only surface — the API is
+  // admin-gated, so non-admins never fetch or see share affordances.
+  const [publicLinks, setPublicLinks] = useState<
+    ReadonlyMap<string, PublicFolderLinkView>
+  >(new Map());
+  const [shareTarget, setShareTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const listGen = useRef(0);
   const detailGen = useRef(0);
   const listAbort = useRef<AbortController | null>(null);
@@ -301,6 +329,29 @@ export function ExplorerPage() {
     if (mount === null || currentFolder === undefined) return;
     void loadListing();
   }, [mount, currentFolder?.id, mode, loadListing, currentFolder]);
+
+  // One-active-link-per-folder map for the current mount; refreshed after
+  // every dialog mutation so .tag-public tracks reality.
+  const refreshPublicLinks = useCallback(async () => {
+    if (mount === null || !isAdmin) {
+      setPublicLinks(new Map());
+      return;
+    }
+    try {
+      const links = await listPublicLinks(mount.id);
+      const map = new Map<string, PublicFolderLinkView>();
+      for (const link of links) {
+        if (link.status === "active") map.set(link.folderId, link);
+      }
+      setPublicLinks(map);
+    } catch {
+      setPublicLinks(new Map());
+    }
+  }, [mount, isAdmin]);
+
+  useEffect(() => {
+    void refreshPublicLinks();
+  }, [refreshPublicLinks]);
 
   // Upload entry (T09): files enqueue into the singleton UploadManager — the
   // queue lives outside routes, so browsing elsewhere never cancels it. When
@@ -720,6 +771,21 @@ export function ExplorerPage() {
             <option value="modified-desc">{t("explorer.sortModifiedDesc")}</option>
           </select>
         </div>
+        {isAdmin && mode.kind === "browse" && currentFolder !== undefined ? (
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            data-testid="share-public-button"
+            onClick={() =>
+              setShareTarget({ id: currentFolder.id, name: currentFolder.name })
+            }
+          >
+            <GlobeIcon className="nav-icon" />
+            {publicLinks.has(currentFolder.id)
+              ? t("explorer.sharePublicActive")
+              : t("explorer.sharePublic")}
+          </button>
+        ) : null}
       </div>
 
       {selectedEntries.length > 0 ? (
@@ -746,73 +812,95 @@ export function ExplorerPage() {
         </div>
       ) : null}
 
-      <div
-        className="listing-drop-area"
-        onDrop={onDirectoryDrop}
-        onDragOver={(event) => {
-          if (canUpload) event.preventDefault();
-        }}
-      >
-      {listing.status === "loading" ? (
-        <p role="status">{t("common.loading")}</p>
-      ) : listing.status === "error" ? (
-        <ErrorPanel error={listing.error} onRetry={() => void loadListing()} />
-      ) : displayedEntries.length === 0 ? (
-        <section className="card empty-state">
-          <p>
-            {mode.kind === "search"
-              ? t("explorer.searchEmpty")
-              : t("explorer.folderEmpty")}
-          </p>
-        </section>
-      ) : view === "list" ? (
-        <EntryTable
-          entries={displayedEntries}
-          locale={locale}
-          mount={mount}
-          selectedIds={selectedIds}
-          onToggle={toggleSelected}
-          onToggleAll={toggleSelectAll}
-          onOpen={openEntry}
-          onShowDetail={openDetail}
-        />
-      ) : (
-        <EntryGrid
-          entries={displayedEntries}
-          locale={locale}
-          mount={mount}
-          selectedIds={selectedIds}
-          onToggle={toggleSelected}
-          onOpen={openEntry}
-        />
-      )}
+      <div className="explorer-body">
+        <div className="explorer-listing">
+          <div
+            className="listing-drop-area"
+            onDrop={onDirectoryDrop}
+            onDragOver={(event) => {
+              if (canUpload) event.preventDefault();
+            }}
+          >
+          {listing.status === "loading" ? (
+            <p role="status">{t("common.loading")}</p>
+          ) : listing.status === "error" ? (
+            <ErrorPanel error={listing.error} onRetry={() => void loadListing()} />
+          ) : displayedEntries.length === 0 ? (
+            <section className="card empty-state">
+              <p>
+                {mode.kind === "search"
+                  ? t("explorer.searchEmpty")
+                  : t("explorer.folderEmpty")}
+              </p>
+            </section>
+          ) : view === "list" ? (
+            <EntryTable
+              entries={displayedEntries}
+              locale={locale}
+              mount={mount}
+              selectedIds={selectedIds}
+              onToggle={toggleSelected}
+              onToggleAll={toggleSelectAll}
+              onOpen={openEntry}
+              onShowDetail={openDetail}
+              publicLinks={isAdmin ? publicLinks : undefined}
+              onShareFolder={
+                isAdmin
+                  ? (entry) =>
+                      setShareTarget({ id: entry.id, name: entry.name })
+                  : undefined
+              }
+            />
+          ) : (
+            <EntryGrid
+              entries={displayedEntries}
+              locale={locale}
+              mount={mount}
+              selectedIds={selectedIds}
+              onToggle={toggleSelected}
+              onOpen={openEntry}
+              publicLinks={isAdmin ? publicLinks : undefined}
+            />
+          )}
+          </div>
+
+          {listing.status === "ready" && listing.partial === true ? (
+            <p className="hint" role="status">
+              {t("explorer.searchPartial")}
+            </p>
+          ) : null}
+
+          {listing.status === "ready" && listing.nextCursor !== undefined ? (
+            <div className="load-more">
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={listing.loadingMore}
+                onClick={() => void loadListing(listing.nextCursor)}
+              >
+                {listing.loadingMore ? t("common.loading") : t("explorer.loadMore")}
+              </button>
+            </div>
+          ) : null}
+        </div>
+
+        {detail !== null ? (
+          <FilePanel
+            mount={mount}
+            detail={detail}
+            siblings={displayedEntries}
+            onClose={invalidateDetail}
+          />
+        ) : null}
       </div>
 
-      {listing.status === "ready" && listing.partial === true ? (
-        <p className="hint" role="status">
-          {t("explorer.searchPartial")}
-        </p>
-      ) : null}
-
-      {listing.status === "ready" && listing.nextCursor !== undefined ? (
-        <div className="load-more">
-          <button
-            type="button"
-            className="btn btn-ghost"
-            disabled={listing.loadingMore}
-            onClick={() => void loadListing(listing.nextCursor)}
-          >
-            {listing.loadingMore ? t("common.loading") : t("explorer.loadMore")}
-          </button>
-        </div>
-      ) : null}
-
-      {detail !== null ? (
-        <FilePanel
-          mount={mount}
-          detail={detail}
-          siblings={displayedEntries}
-          onClose={invalidateDetail}
+      {shareTarget !== null && mount !== null ? (
+        <SharePublicDialog
+          mountId={mount.id}
+          folder={shareTarget}
+          link={publicLinks.get(shareTarget.id) ?? null}
+          onClose={() => setShareTarget(null)}
+          onChanged={() => void refreshPublicLinks()}
         />
       ) : null}
     </>
@@ -885,6 +973,8 @@ function EntryTable({
   onToggleAll,
   onOpen,
   onShowDetail,
+  publicLinks,
+  onShareFolder,
 }: {
   entries: DriveFileEntry[];
   locale: string;
@@ -894,6 +984,9 @@ function EntryTable({
   onToggleAll: (checked: boolean) => void;
   onOpen: (entry: DriveFileEntry) => void;
   onShowDetail: (entry: DriveFileEntry) => void;
+  /** Active public links by folder id (admin only); absent for users. */
+  publicLinks?: ReadonlyMap<string, PublicFolderLinkView>;
+  onShareFolder?: (entry: DriveFileEntry) => void;
 }) {
   const { t } = useI18n();
   const allSelected =
@@ -921,7 +1014,11 @@ function EntryTable({
         </thead>
         <tbody>
           {entries.map((entry) => (
-            <tr key={entry.id}>
+            <tr
+              key={entry.id}
+              className={selectedIds.has(entry.id) ? "is-selected" : undefined}
+              aria-selected={selectedIds.has(entry.id)}
+            >
               <td>
                 <input
                   type="checkbox"
@@ -931,25 +1028,35 @@ function EntryTable({
                 />
               </td>
               <td className="entry-name">
-                <span aria-hidden="true">{kindIcon(entry)}</span>{" "}
                 <button
                   type="button"
                   className="entry-link"
                   title={entry.name}
                   onClick={() => onOpen(entry)}
                 >
+                  <EntryKindIcon entry={entry} />
                   {entry.name}
                 </button>
                 {entry.kind === "shortcut" ? (
-                  <span className="badge">{kindLabel(t, entry)}</span>
+                  <span className="badge badge-muted">
+                    {kindLabel(t, entry)}
+                  </span>
+                ) : null}
+                {publicLinks?.has(entry.id) ? (
+                  <span className="tag-public">
+                    <GlobeIcon className="tag-public-icon" />
+                    {t("explorer.publicTag")}
+                  </span>
                 ) : null}
               </td>
-              <td>
+              <td className="entry-meta">
                 {entry.kind === "folder"
                   ? "—"
                   : formatBytes(entry.size, locale)}
               </td>
-              <td>{formatDateTime(entry.modifiedTime, locale)}</td>
+              <td className="entry-meta">
+                {formatDateTime(entry.modifiedTime, locale)}
+              </td>
               <td className="entry-actions">
                 {/* Content endpoints take literal resolved file IDs and
                     reject shortcut IDs — only real files get a direct
@@ -964,6 +1071,17 @@ function EntryTable({
                   >
                     {t("explorer.download")}
                   </a>
+                ) : null}
+                {entry.kind === "folder" && onShareFolder !== undefined ? (
+                  <button
+                    type="button"
+                    className="btn-icon btn-sm"
+                    title={t("explorer.sharePublic")}
+                    aria-label={t("explorer.sharePublic")}
+                    onClick={() => onShareFolder(entry)}
+                  >
+                    <GlobeIcon className="nav-icon" />
+                  </button>
                 ) : null}
                 <button
                   type="button"
@@ -988,6 +1106,7 @@ function EntryGrid({
   selectedIds,
   onToggle,
   onOpen,
+  publicLinks,
 }: {
   entries: DriveFileEntry[];
   locale: string;
@@ -995,6 +1114,7 @@ function EntryGrid({
   selectedIds: ReadonlySet<string>;
   onToggle: (id: string, checked: boolean) => void;
   onOpen: (entry: DriveFileEntry) => void;
+  publicLinks?: ReadonlyMap<string, PublicFolderLinkView>;
 }) {
   const { t } = useI18n();
   return (
@@ -1021,7 +1141,7 @@ function EntryGrid({
             />
           ) : (
             <span className="entry-thumb-icon" aria-hidden="true">
-              {kindIcon(entry)}
+              <EntryKindIcon entry={entry} />
             </span>
           )}
           <button
@@ -1032,6 +1152,12 @@ function EntryGrid({
           >
             {entry.name}
           </button>
+          {publicLinks?.has(entry.id) ? (
+            <span className="tag-public">
+              <GlobeIcon className="tag-public-icon" />
+              {t("explorer.publicTag")}
+            </span>
+          ) : null}
           <span className="entry-card-meta">
             {entry.kind === "folder"
               ? kindLabel(t, entry)
@@ -1128,7 +1254,7 @@ function FilePanel({
           aria-label={t("explorer.closeDetail")}
           onClick={onClose}
         >
-          ✕
+          <XIcon />
         </button>
       </div>
       {detail.status === "loading" ? (
@@ -1154,7 +1280,17 @@ function FilePanel({
             <dt>{t("explorer.readinessLabel")}</dt>
             <dd>
               {readinessState !== null ? (
-                <span className="badge">
+                <span
+                  className={`badge ${
+                    readinessState === "readable"
+                      ? "badge-ok"
+                      : readinessState === "blocked"
+                        ? "badge-warn"
+                        : readinessState === "pending"
+                          ? "badge-caution"
+                          : "badge-muted"
+                  }`}
+                >
                   {t(
                     readinessState === "readable"
                       ? "explorer.readerReadable"

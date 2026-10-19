@@ -1,4 +1,6 @@
 import "./lib/zod-config";
+import "@fontsource-variable/manrope";
+import "@fontsource-variable/jetbrains-mono";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./app";

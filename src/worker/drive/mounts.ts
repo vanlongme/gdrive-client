@@ -151,6 +151,9 @@ export function statusForApiCode(code: ApiErrorCode): number {
       return 401;
     case 'FORBIDDEN':
     case 'ORIGIN_REJECTED':
+    case 'PUBLIC_LINK_PASSWORD_REQUIRED':
+    case 'PUBLIC_LINK_INVALID_PASSWORD':
+    case 'PUBLIC_LINK_ARCHIVE_DISABLED':
       return 403;
     case 'NOT_FOUND':
     case 'FILE_NOT_ACCESSIBLE':
@@ -166,7 +169,12 @@ export function statusForApiCode(code: ApiErrorCode): number {
     case 'UPLOAD_EXPIRED':
     case 'UPLOAD_NEEDS_RECONCILIATION':
     case 'MOUNT_KIND_UNSUPPORTED':
+    case 'PUBLIC_LINK_CONFLICT':
       return 409;
+    case 'PUBLIC_LINK_EXPIRED':
+      return 410;
+    case 'PUBLIC_LINK_TOO_LARGE':
+      return 413;
     case 'PREVIEW_UNSUPPORTED':
       return 415;
     case 'RATE_LIMITED':

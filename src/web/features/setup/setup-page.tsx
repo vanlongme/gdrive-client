@@ -2,8 +2,10 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import { Link, useNavigate } from "react-router";
 import { ApiClientError, submitSetup } from "../../lib/api";
+import { BrandBlock } from "../../components/brand";
 import { useI18n } from "../../lib/i18n";
 import { useSetupStatus } from "../../lib/setup-status";
+import { useDocumentTitle } from "../../lib/site";
 
 /**
  * Step 1 of the onboarding flow (spec section 11.3): claim the installation
@@ -12,6 +14,7 @@ import { useSetupStatus } from "../../lib/setup-status";
  */
 export function SetupPage() {
   const { t, messages } = useI18n();
+  useDocumentTitle(t("setup.title"));
   const { state, refresh } = useSetupStatus();
   const navigate = useNavigate();
 
@@ -40,7 +43,9 @@ export function SetupPage() {
   if (state.status === "error") {
     return (
       <main className="auth-layout">
-        <div className="card auth-panel">
+        <div className="auth-stack">
+          <BrandBlock detail="tagline" className="auth-brand" />
+          <div className="card auth-panel">
           <h1>{t("app.name")}</h1>
           <p role="alert" className="alert alert-error">
             {t("shell.statusError")}
@@ -48,6 +53,7 @@ export function SetupPage() {
           <button type="button" className="btn btn-ghost" onClick={() => void refresh()}>
             {t("common.retry")}
           </button>
+          </div>
         </div>
       </main>
     );
@@ -56,16 +62,15 @@ export function SetupPage() {
   if (state.view.setupState === "complete") {
     return (
       <main className="auth-layout">
-        <div className="card auth-panel">
-          <div className="brand">
-            <span>{t("app.name")}</span>
-            <span className="tagline">{t("app.tagline")}</span>
-          </div>
+        <div className="auth-stack">
+          <BrandBlock detail="tagline" className="auth-brand" />
+          <div className="card auth-panel">
           <h1>{t("setup.title")}</h1>
           <p className="alert alert-info">{t("setup.alreadyComplete")}</p>
           <Link className="btn btn-primary" to="/login">
             {t("setup.goToSignIn")}
           </Link>
+          </div>
         </div>
       </main>
     );
@@ -141,12 +146,9 @@ export function SetupPage() {
 
   return (
     <main className="auth-layout">
-      <div className="auth-panel">
-        <div className="card">
-          <div className="brand">
-            <span>{t("app.name")}</span>
-            <span className="tagline">{t("app.tagline")}</span>
-          </div>
+      <div className="auth-stack">
+        <BrandBlock detail="tagline" className="auth-brand" />
+        <div className="card auth-panel">
           <h1>{t("setup.title")}</h1>
           <p>{t("setup.intro")}</p>
 
@@ -268,7 +270,7 @@ export function SetupPage() {
           </form>
         </div>
 
-        <section className="card" style={{ marginTop: "var(--space-4)" }}>
+        <section className="card">
           <h2 style={{ marginTop: 0, fontSize: "1rem" }}>{t("setup.stepsTitle")}</h2>
           <ol className="steps">
             {messages.setup.steps.map((step, index) => (

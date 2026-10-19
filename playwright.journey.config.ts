@@ -22,7 +22,7 @@ export default defineConfig({
     {
       name: "chromium",
       use: { channel: "chrome" },
-      testMatch: /(journey|my-drive)\.spec\.ts$/,
+      testMatch: /(journey|my-drive|public-link)\.spec\.ts$/,
     },
     // journey.spec.ts uses fixed names and cannot run twice on one server;
     // my-drive.spec.ts namespaces everything by project name.

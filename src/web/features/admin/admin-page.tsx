@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useI18n } from "../../lib/i18n";
 import type { MessagePath } from "../../lib/i18n";
 import { useSession } from "../../lib/session";
+import { useDocumentTitle } from "../../lib/site";
 import type { SharedDriveEntry } from "../../lib/admin-api";
 import { ConnectionsSection } from "./connections-section";
 import { HealthSection } from "./health-section";
@@ -10,6 +11,7 @@ import { MountsSection, type MountDrivePrefill } from "./mounts-section";
 import { OnboardingSection } from "./onboarding-section";
 import { ServiceAccountsSection } from "./service-accounts-section";
 import { SharesSection } from "./shares-section";
+import { SiteSection } from "./site-section";
 import { UsersSection } from "./users-section";
 
 /**
@@ -19,6 +21,7 @@ import { UsersSection } from "./users-section";
  */
 type SectionKey =
   | "onboarding"
+  | "site"
   | "connections"
   | "serviceAccounts"
   | "mounts"
@@ -29,6 +32,7 @@ type SectionKey =
 
 const SECTIONS: { key: SectionKey; labelKey: MessagePath }[] = [
   { key: "onboarding", labelKey: "admin.tab_onboarding" },
+  { key: "site", labelKey: "admin.tab_site" },
   { key: "connections", labelKey: "admin.tab_connections" },
   { key: "serviceAccounts", labelKey: "admin.tab_serviceAccounts" },
   { key: "mounts", labelKey: "admin.tab_mounts" },
@@ -40,6 +44,7 @@ const SECTIONS: { key: SectionKey; labelKey: MessagePath }[] = [
 
 export function AdminPage() {
   const { t } = useI18n();
+  useDocumentTitle(t("admin.title"));
   const { state } = useSession();
   const [section, setSection] = useState<SectionKey>("onboarding");
   const [mountPrefill, setMountPrefill] = useState<MountDrivePrefill | null>(
@@ -105,6 +110,7 @@ export function AdminPage() {
       {section === "onboarding" ? (
         <OnboardingSection onNavigate={setSection} onPickDrive={pickDrive} />
       ) : null}
+      {section === "site" ? <SiteSection /> : null}
       {section === "connections" ? <ConnectionsSection /> : null}
       {section === "serviceAccounts" ? <ServiceAccountsSection /> : null}
       {section === "mounts" ? (

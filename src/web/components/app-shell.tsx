@@ -4,7 +4,16 @@ import { TransferDrawer } from "../features/transfers/transfer-drawer";
 import { useTransferRestore } from "../features/transfers/use-transfers";
 import { useI18n, LOCALES, type Locale } from "../lib/i18n";
 import { useSession } from "../lib/session";
+import { useSite } from "../lib/site";
 import { THEME_CHOICES, useTheme, type ThemeChoice } from "../lib/theme";
+import { BrandBlock, BrandMark } from "./brand";
+import {
+  AdminIcon,
+  FolderIcon,
+  MenuIcon,
+  TransferIcon,
+  XIcon,
+} from "./icons";
 
 /**
  * Authenticated frame: a ~240px sidebar on desktop, a top bar with a
@@ -66,13 +75,16 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <nav aria-label={t("a11y.mainNavigation")} className="nav-list">
       <NavLink to="/explorer" onClick={onNavigate}>
+        <FolderIcon className="nav-icon" />
         {t("nav.explorer")}
       </NavLink>
       <NavLink to="/transfers" onClick={onNavigate}>
+        <TransferIcon className="nav-icon" />
         {t("nav.transfers")}
       </NavLink>
       {isAdmin ? (
         <NavLink to="/admin" onClick={onNavigate}>
+          <AdminIcon className="nav-icon" />
           {t("nav.admin")}
         </NavLink>
       ) : null}
@@ -127,12 +139,9 @@ function UserCard() {
 }
 
 function SidebarContents({ onNavigate }: { onNavigate?: () => void }) {
-  const { t } = useI18n();
   return (
     <>
-      <div className="brand">
-        <span>{t("app.name")}</span>
-      </div>
+      <BrandBlock detail="host" />
       <NavLinks onNavigate={onNavigate} />
       <div className="sidebar-footer">
         <Preferences />
@@ -144,6 +153,7 @@ function SidebarContents({ onNavigate }: { onNavigate?: () => void }) {
 
 export function AppShell() {
   const { t } = useI18n();
+  const { site } = useSite();
   const [drawerOpen, setDrawerOpen] = useState(false);
   // Reload recovery: read IndexedDB metadata once; items that lack a live
   // source drop into the needs-reselect state (T09).
@@ -207,9 +217,14 @@ export function AppShell() {
           aria-label={drawerOpen ? t("a11y.closeMenu") : t("a11y.openMenu")}
           onClick={() => (drawerOpen ? closeDrawer() : setDrawerOpen(true))}
         >
-          ☰
+          <MenuIcon />
         </button>
-        <span className="brand">{t("app.name")}</span>
+        <span className="brand">
+          <span className="brand-title">
+            <BrandMark className="brand-mark" />
+            {site.title}
+          </span>
+        </span>
       </header>
 
       <aside className="shell-sidebar" aria-label={t("a11y.mainNavigation")}>
@@ -238,7 +253,7 @@ export function AppShell() {
               aria-label={t("a11y.closeMenu")}
               onClick={closeDrawer}
             >
-              ✕
+              <XIcon />
             </button>
             <SidebarContents onNavigate={closeDrawer} />
           </div>

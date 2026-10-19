@@ -10,10 +10,10 @@
   bottom: var(--space-4);
   width: min(26rem, calc(100vw - 2 * var(--space-4)));
   max-width: calc(100vw - 2 * var(--space-4));
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-drawer);
+  background: var(--surface-raised);
+  border: 0;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-4);
   z-index: 40;
 }
 
@@ -26,7 +26,8 @@
 
 .transfer-drawer-head h2 {
   margin: 0;
-  font-size: 1rem;
+  font-size: 15px;
+  font-weight: 600;
   flex: 1;
   min-width: 0;
 }
@@ -35,50 +36,95 @@
   max-height: 20rem;
   overflow-y: auto;
   padding: var(--space-3);
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--divider);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+}
+
+/* Summary stat cards (A5): running / speed / queued / needs attention. */
+.transfer-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.transfer-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-1);
+}
+
+.transfer-stat .stat-value {
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.transfer-stat .stat-value.mono {
+  font-size: 16px;
+  line-height: 28px;
 }
 
 .transfer-list {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .transfer-item {
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+  box-shadow: var(--shadow-1);
+  padding: var(--space-3) var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
 }
 
-.transfer-item-head {
+.transfer-drawer .transfer-item {
+  background: var(--surface-sunken);
+  box-shadow: none;
+}
+
+.transfer-item-head,
+.transfer-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-2);
 }
 
 .transfer-name {
-  font-weight: 600;
+  font-weight: 500;
   overflow-wrap: anywhere;
   min-width: 0;
 }
 
-.transfer-meta {
-  font-size: 0.85rem;
-  color: var(--text-muted);
+.transfer-meta,
+.transfer-progress-text {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-secondary);
 }
 
 .transfer-progress {
   position: relative;
-  height: 0.5rem;
-  border-radius: 999px;
-  background: var(--surface-alt);
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--surface-inset);
   overflow: hidden;
 }
 
@@ -100,7 +146,7 @@
 }
 
 .transfer-item[data-state="completed"] .transfer-progress .fill-confirmed {
-  background: var(--success);
+  background: var(--status-nominal);
 }
 
 .transfer-actions {
@@ -111,14 +157,16 @@
 
 .transfer-error {
   margin: 0;
-  font-size: 0.85rem;
-  color: var(--danger);
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-danger);
 }
 
 .transfer-note {
   margin: 0;
-  font-size: 0.85rem;
-  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-secondary);
 }
 
 @media (max-width: 640px) {
@@ -136,7 +184,7 @@
   padding: 0;
   max-height: 240px;
   overflow-y: auto;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
 }
 .folder-node {
@@ -144,10 +192,21 @@
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-1) var(--space-2);
-  font-size: var(--font-size-sm);
+  font-size: 12px;
+  line-height: 16px;
 }
 .folder-node + .folder-node {
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid var(--divider);
+}
+.folder-node-icon {
+  flex: none;
+  inline-size: 16px;
+  block-size: 16px;
+  color: var(--gray-400);
+}
+.folder-node-icon svg {
+  inline-size: 100%;
+  block-size: 100%;
 }
 .folder-node-name {
   flex: 1;
@@ -156,11 +215,13 @@
   white-space: nowrap;
 }
 .badge-sm {
-  font-size: var(--font-size-xs);
+  min-height: 18px;
+  font-size: 11px;
 }
 .btn-xs {
+  min-height: 26px;
   padding: 0 var(--space-2);
-  font-size: var(--font-size-xs);
+  font-size: 11px;
 }
 .listing-drop-area {
   outline-offset: -2px;

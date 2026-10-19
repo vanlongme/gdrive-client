@@ -5,11 +5,13 @@ import { NotFoundPage } from "./components/not-found";
 import { AdminPage } from "./features/admin/admin-page";
 import { LoginPage } from "./features/auth/login-page";
 import { ExplorerPage } from "./features/explorer/explorer-page";
+import { PublicFolderPage } from "./features/public/public-folder-page";
 import { SetupPage } from "./features/setup/setup-page";
 import { TransfersPage } from "./features/transfers/transfers-page";
 import { LocaleProvider, useI18n } from "./lib/i18n";
 import { SessionProvider, useSession } from "./lib/session";
 import { SetupStatusProvider, useSetupStatus } from "./lib/setup-status";
+import { SiteProvider } from "./lib/site";
 import { ThemeProvider } from "./lib/theme";
 
 /**
@@ -18,6 +20,8 @@ import { ThemeProvider } from "./lib/theme";
  *   unauthenticated, Explorer once signed in.
  * - /setup and /login sit outside the authenticated frame.
  * - The app shell owns navigation; feature areas render through its Outlet.
+ * - /p/:slug (wave-8) is the anonymous public surface: it never mounts the
+ *   setup/session providers, so it cannot issue session or admin calls.
  */
 function Splash() {
   const { t } = useI18n();
@@ -86,35 +90,50 @@ function RequireAuth() {
   return <Outlet />;
 }
 
+/** Providers that issue app API calls — everything except the public page. */
+function AppProviders() {
+  return (
+    <SetupStatusProvider>
+      <SessionProvider>
+        <Outlet />
+      </SessionProvider>
+    </SetupStatusProvider>
+  );
+}
+
 const router = createBrowserRouter([
-  { path: "/", element: <HomeRedirect /> },
-  { path: "/setup", element: <SetupPage /> },
-  { path: "/login", element: <LoginPage /> },
+  { path: "/p/:slug", element: <PublicFolderPage /> },
   {
-    element: <RequireAuth />,
+    element: <AppProviders />,
     children: [
+      { path: "/", element: <HomeRedirect /> },
+      { path: "/setup", element: <SetupPage /> },
+      { path: "/login", element: <LoginPage /> },
       {
-        element: <AppShell />,
+        element: <RequireAuth />,
         children: [
-          { path: "/explorer", element: <ExplorerPage /> },
-          { path: "/transfers", element: <TransfersPage /> },
-          { path: "/admin", element: <AdminPage /> },
+          {
+            element: <AppShell />,
+            children: [
+              { path: "/explorer", element: <ExplorerPage /> },
+              { path: "/transfers", element: <TransfersPage /> },
+              { path: "/admin", element: <AdminPage /> },
+            ],
+          },
         ],
       },
+      { path: "*", element: <NotFoundPage /> },
     ],
   },
-  { path: "*", element: <NotFoundPage /> },
 ]);
 
 export function App() {
   return (
     <LocaleProvider>
       <ThemeProvider>
-        <SetupStatusProvider>
-          <SessionProvider>
-            <RouterProvider router={router} />
-          </SessionProvider>
-        </SetupStatusProvider>
+        <SiteProvider>
+          <RouterProvider router={router} />
+        </SiteProvider>
       </ThemeProvider>
     </LocaleProvider>
   );

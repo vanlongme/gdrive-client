@@ -38,7 +38,7 @@ export default defineConfig({
   // The fake-Google journey and My Drive specs run against their own
   // Miniflare server on :8878 through playwright.journey.config.ts, never
   // against this :8877 preview.
-  testIgnore: /(journey|my-drive)\.spec\.ts$/,
+  testIgnore: /(journey|my-drive|public-link)\.spec\.ts$/,
   timeout: 30_000,
   fullyParallel: true,
   workers: 1,

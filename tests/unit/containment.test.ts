@@ -275,7 +275,7 @@ describe('oauthParentLookup', () => {
       const folder = 'application/vnd.google-apps.folder';
       return { id: input.ref.id, name: 'Folder', mimeType: folder, parents: ['up'], trashed: false, hasThumbnail: false };
     });
-    expect(await oauthParentLookup({ provider, writer })('f-9')).toEqual({ id: 'f-9', parents: ['up'], trashed: false });
+    expect(await oauthParentLookup({ provider, writer })('f-9')).toEqual({ id: 'f-9', name: 'Folder', parents: ['up'], trashed: false });
     expect(seen[0]?.writer).toBe(writer);
     expect(seen[0]?.ref).toEqual({ id: 'f-9' });
   });

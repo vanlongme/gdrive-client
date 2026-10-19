@@ -5,40 +5,42 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-3, 0.75rem);
+  gap: var(--space-3);
 }
 
-.admin-ops-note {
-  color: var(--color-text-muted, #64748b);
-  font-size: var(--font-sm, 0.875rem);
+.admin-ops-note,
+.admin-ops-hint {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 18px;
 }
 
 .admin-ops-row {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2, 0.5rem);
+  gap: var(--space-2);
   align-items: flex-start;
-  margin-block: var(--space-2, 0.5rem);
+  margin-block: var(--space-2);
 }
 
 .admin-ops-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: var(--space-2, 0.5rem) var(--space-4, 1rem);
-  margin-block: var(--space-2, 0.5rem);
+  gap: var(--space-2) var(--space-4);
+  margin-block: var(--space-2);
 }
 
 .admin-ops-kv {
   display: flex;
   justify-content: space-between;
-  gap: var(--space-3, 0.75rem);
-  border-bottom: 1px solid var(--color-border, #e2e8f0);
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--divider);
   padding-block: 2px;
 }
 
 .admin-ops-kv dt {
-  color: var(--color-text-muted, #64748b);
-  font-size: var(--font-sm, 0.875rem);
+  color: var(--text-tertiary);
+  font-size: 13px;
 }
 
 .admin-ops-kv dd {
@@ -47,49 +49,50 @@
 }
 
 .admin-ops-result {
-  border-left: 3px solid var(--color-border, #e2e8f0);
-  padding-inline-start: var(--space-3, 0.75rem);
-  margin-block: var(--space-2, 0.5rem);
+  border-left: 3px solid var(--border-strong);
+  padding-inline-start: var(--space-3);
+  margin-block: var(--space-2);
 }
 
 .admin-ops-steps {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--space-2, 0.5rem);
+  gap: var(--space-2);
   list-style: none;
   padding: 0;
-  margin-block: var(--space-3, 0.75rem);
+  margin-block: var(--space-3);
   counter-reset: ops-step;
 }
 
 .admin-ops-step {
-  border: 1px solid var(--color-border, #e2e8f0);
-  border-radius: var(--radius-sm, 4px);
-  padding: 2px var(--space-2, 0.5rem);
-  font-size: var(--font-sm, 0.875rem);
-  color: var(--color-text-muted, #64748b);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  padding: 2px var(--space-2);
+  font-size: 13px;
+  color: var(--text-secondary);
 }
 
 .admin-ops-step-done {
-  border-color: var(--color-success, #16a34a);
-  color: var(--color-success, #16a34a);
+  border-color: var(--status-nominal);
+  color: var(--success-fg);
 }
 
 .admin-ops-step-current {
-  border-color: var(--color-primary, #2563eb);
-  color: var(--color-primary, #2563eb);
+  border-color: var(--accent);
+  color: var(--text-accent);
   font-weight: 600;
 }
 
 .admin-ops-step-failed {
-  border-color: var(--color-danger, #dc2626);
-  color: var(--color-danger, #dc2626);
+  border-color: var(--status-critical);
+  color: var(--danger-fg);
   font-weight: 600;
 }
 
 .admin-ops-diag h4,
 .admin-section h3 + .admin-ops-note {
-  margin-top: var(--space-3, 0.75rem);
+  margin-top: var(--space-3);
 }
 
 @media (max-width: 40rem) {
@@ -100,66 +103,69 @@
 
 /* T11 onboarding checklist + Shared Drive chooser. */
 .onboarding-steps li strong {
-  margin-right: var(--space-2, 0.5rem);
+  margin-right: var(--space-2);
 }
 
 .callback-line {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-2, 0.5rem);
+  gap: var(--space-2);
   flex-wrap: wrap;
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .drive-chooser {
-  margin-top: var(--space-2, 0.5rem);
+  margin-top: var(--space-2);
 }
 
 .drive-list {
   list-style: none;
-  margin: var(--space-2, 0.5rem) 0;
+  margin: var(--space-2) 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-2, 0.5rem);
+  gap: var(--space-2);
 }
 
 .drive-row {
   display: flex;
   align-items: center;
-  gap: var(--space-2, 0.5rem);
+  gap: var(--space-2);
   flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
 }
 
 .drive-name {
-  font-weight: 600;
+  font-weight: 500;
 }
 
 /* W7: mount source tabs, My Drive folder browser, pool read access panel. */
 .mount-tabs {
   display: flex;
-  gap: var(--space-2, 0.5rem);
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
 .mount-tabs [role="tab"][aria-selected="true"] {
-  background: var(--accent-subtle);
+  background: var(--surface-selected);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--text-accent);
 }
 
 .folder-browser {
-  margin-top: var(--space-2, 0.5rem);
+  margin-top: var(--space-2);
   display: flex;
   flex-direction: column;
-  gap: var(--space-2, 0.5rem);
+  gap: var(--space-2);
 }
 
 .folder-crumbs {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-2, 0.5rem);
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
@@ -168,7 +174,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-1, 0.25rem);
+  gap: var(--space-1);
   margin: 0;
   padding: 0;
 }
@@ -176,17 +182,17 @@
 .folder-crumbs li {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1, 0.25rem);
+  gap: var(--space-1);
 }
 
 .folder-link {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1, 0.25rem);
+  gap: var(--space-1);
 }
 
 .folder-link label {
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .read-grants-progress {
@@ -196,9 +202,9 @@
 
 .read-grants-failures {
   list-style: none;
-  margin: var(--space-2, 0.5rem) 0;
+  margin: var(--space-2) 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-1, 0.25rem);
+  gap: var(--space-1);
 }

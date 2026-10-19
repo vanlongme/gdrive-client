@@ -96,10 +96,22 @@ export const MOUNT_ERROR_CODES = [
   'MOUNT_WRITER_MISMATCH',
 ] as const;
 
+// Public folder links (wave 8 Phase B2): link lifecycle and access surface
+// under /api/v1/p plus admin conflict/limit failures on /api/v1/public-links.
+export const PUBLIC_LINK_ERROR_CODES = [
+  'PUBLIC_LINK_EXPIRED',
+  'PUBLIC_LINK_PASSWORD_REQUIRED',
+  'PUBLIC_LINK_INVALID_PASSWORD',
+  'PUBLIC_LINK_CONFLICT',
+  'PUBLIC_LINK_ARCHIVE_DISABLED',
+  'PUBLIC_LINK_TOO_LARGE',
+] as const;
+
 export const API_ERROR_CODES = [
   ...SPEC_ERROR_CODES,
   ...INTERNAL_ERROR_CODES,
   ...MOUNT_ERROR_CODES,
+  ...PUBLIC_LINK_ERROR_CODES,
 ] as const;
 export const ApiErrorCodeSchema = z.enum(API_ERROR_CODES);
 export type ApiErrorCode = z.infer<typeof ApiErrorCodeSchema>;
