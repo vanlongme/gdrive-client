@@ -79,12 +79,13 @@ describe('unlock cookie', () => {
 describe('slugs', () => {
   it('ascii-folds Vietnamese names and appends a base32 suffix', () => {
     const slug = generatePublicLinkSlug('Tài liệu tháng 10!');
-    expect(/^[a-z0-9-]+-[a-z2-7]{6}$/.test(slug)).toBe(true);
+    expect(/^[a-z0-9-]+-[a-z2-7]{26}$/.test(slug)).toBe(true);
+    expect(slug.length).toBeLessThanOrEqual(64);
     expect(slug.startsWith('tai-lieu-thang-10-')).toBe(true);
   });
   it('clips the folded name to 32 chars and handles empties', () => {
     const slug = generatePublicLinkSlug('a'.repeat(80));
-    const folded = slug.slice(0, -7);
+    const folded = slug.slice(0, -27);
     expect(folded.length).toBeLessThanOrEqual(32);
     expect(generatePublicLinkSlug('!!!').startsWith('folder-')).toBe(true);
   });

@@ -253,7 +253,9 @@ export function readPublicLinkCookie(request: Request): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Slugs: ascii-folded folder name (<=32) + '-' + 6 base32 chars
+// Slugs: ascii-folded folder name (<=32) + '-' + 26 base32 chars (130 bits).
+// The name is cosmetic; the suffix is the capability for links without a
+// password, so it must not be guessable.
 // ---------------------------------------------------------------------------
 
 const BASE32_ALPHABET = 'abcdefghijklmnopqrstuvwxyz234567';
@@ -280,7 +282,7 @@ function base32Suffix(length: number): string {
 }
 
 export function generatePublicLinkSlug(folderName: string): string {
-  return `${asciiFoldName(folderName)}-${base32Suffix(6)}`;
+  return `${asciiFoldName(folderName)}-${base32Suffix(26)}`;
 }
 
 /** Fresh random id for a link row. */
