@@ -81,12 +81,13 @@ export const OAuthStartResponseSchema = z
 export type OAuthStartResponse = z.infer<typeof OAuthStartResponseSchema>;
 
 // Admin-facing SA metadata. envelope/key material never leaves the server.
+// keyId may be '' when the imported key JSON carried no private_key_id.
 export const ServiceAccountViewSchema = z
   .object({
     id: IdSchema,
     projectId: z.string().min(1),
     email: z.string().min(1),
-    keyId: z.string().min(1),
+    keyId: z.string().max(256),
     enabled: z.boolean(),
     version: z.number().int().min(1),
     createdAt: IsoTimestampSchema,
@@ -218,11 +219,33 @@ export type ImportOAuthClientRequest = z.infer<
 
 // POST /api/v1/admin/service-accounts — raw Google service-account key JSON.
 // Private material is sealed; the response only carries public metadata.
+// duplicatePolicy 'rotate' (default) keeps the original semantics: the same
+// (project_id, client_email) rotates the stored key in place. 'skip' never
+// writes: it answers 'duplicate' when the identity provably stores the same
+// key (same private_key_id, or the same key-material fingerprint when either
+// side lacks a key id) and 'conflict' when the stored key differs or cannot
+// be proven identical — rotation is always an explicit client choice.
 export const ImportServiceAccountRequestSchema = z
-  .object({ keyJson: z.string().min(1).max(65536) })
+  .object({
+    keyJson: z.string().min(1).max(65536),
+    duplicatePolicy: z.enum(['rotate', 'skip']).optional(),
+  })
   .strict();
 export type ImportServiceAccountRequest = z.infer<
   typeof ImportServiceAccountRequestSchema
+>;
+
+export const SERVICE_ACCOUNT_IMPORT_OUTCOMES = [
+  'imported',
+  'rotated',
+  'duplicate',
+  'conflict',
+] as const;
+export const ServiceAccountImportOutcomeSchema = z.enum(
+  SERVICE_ACCOUNT_IMPORT_OUTCOMES,
+);
+export type ServiceAccountImportOutcome = z.infer<
+  typeof ServiceAccountImportOutcomeSchema
 >;
 
 // POST /api/v1/admin/mounts — create a mount over a Shared Drive or a folder
@@ -319,9 +342,104 @@ export const OAuthClientResponseSchema = z
 export const ServiceAccountResponseSchema = z
   .object({ serviceAccount: ServiceAccountViewSchema })
   .strict();
+export const ServiceAccountImportResponseSchema = z
+  .object({
+    serviceAccount: ServiceAccountViewSchema,
+    outcome: ServiceAccountImportOutcomeSchema,
+  })
+  .strict();
 export const ServiceAccountListResponseSchema = z
   .object({ serviceAccounts: z.array(ServiceAccountViewSchema) })
   .strict();
+
+// GET /api/v1/admin/service-accounts/overview (wave 10): the SA-management
+// view — every SA with its pool memberships, My Drive grant progress and
+// live cooldown flag. Batched server-side (constant query count + one
+// coordinator.health per project); carries metadata only.
+export const SERVICE_ACCOUNT_OVERVIEW_GRANT_STATES = [
+  'granted',
+  'pending',
+  'revoking',
+  'failed',
+  'none',
+] as const;
+export const ServiceAccountOverviewGrantStateSchema = z.enum(
+  SERVICE_ACCOUNT_OVERVIEW_GRANT_STATES,
+);
+export type ServiceAccountOverviewGrantState = z.infer<
+  typeof ServiceAccountOverviewGrantStateSchema
+>;
+export const ServiceAccountOverviewMountSchema = z
+  .object({ id: IdSchema, label: z.string().min(1).max(256) })
+  .strict();
+export const ServiceAccountOverviewGrantSchema = z
+  .object({
+    mountId: IdSchema,
+    state: ServiceAccountOverviewGrantStateSchema,
+  })
+  .strict();
+export const ServiceAccountOverviewEntrySchema = z
+  .object({
+    ...ServiceAccountViewSchema.shape,
+    /** null when the project's coordinator health check failed — unknown. */
+    coolingDown: z.boolean().nullable(),
+    cooldownUntil: IsoTimestampSchema.nullable(),
+    mounts: z.array(ServiceAccountOverviewMountSchema),
+    /** One entry per My Drive mount whose read pool contains this SA. */
+    grants: z.array(ServiceAccountOverviewGrantSchema),
+  })
+  .strict();
+export type ServiceAccountOverviewEntry = z.infer<
+  typeof ServiceAccountOverviewEntrySchema
+>;
+export const ServiceAccountOverviewResponseSchema = z
+  .object({ serviceAccounts: z.array(ServiceAccountOverviewEntrySchema) })
+  .strict();
+export type ServiceAccountOverviewResponse = z.infer<
+  typeof ServiceAccountOverviewResponseSchema
+>;
+
+// POST /api/v1/admin/service-accounts/bulk — enable/disable up to 200 ids
+// with the same per-account semantics as the single endpoint (version bump
+// only on a real flag change, read-pool invalidation, audit per id). Every
+// requested id gets an explicit result — no silent partial success.
+export const ServiceAccountBulkRequestSchema = z
+  .object({
+    action: z.enum(['enable', 'disable']),
+    ids: z.array(IdSchema).min(1).max(200),
+  })
+  .strict();
+export type ServiceAccountBulkRequest = z.infer<
+  typeof ServiceAccountBulkRequestSchema
+>;
+export const ServiceAccountBulkResultSchema = z
+  .object({
+    id: IdSchema,
+    ok: z.boolean(),
+    serviceAccount: ServiceAccountViewSchema.optional(),
+    code: z.string().min(1).optional(),
+    message: z.string().min(1).optional(),
+  })
+  .strict();
+export type ServiceAccountBulkResult = z.infer<
+  typeof ServiceAccountBulkResultSchema
+>;
+export const ServiceAccountBulkResponseSchema = z
+  .object({ results: z.array(ServiceAccountBulkResultSchema) })
+  .strict();
+export type ServiceAccountBulkResponse = z.infer<
+  typeof ServiceAccountBulkResponseSchema
+>;
+
+// POST /api/v1/admin/mounts/:id/read-pool/add|remove — incremental pool
+// edits: same validation as the PUT replace (a pool holds at most 100
+// members), atomic, one readPoolVersion bump per call.
+export const ModifyReadPoolRequestSchema = z
+  .object({ serviceAccountIds: z.array(IdSchema).min(1).max(100) })
+  .strict();
+export type ModifyReadPoolRequest = z.infer<
+  typeof ModifyReadPoolRequestSchema
+>;
 export const MountAdminResponseSchema = z
   .object({ mount: MountAdminViewSchema })
   .strict();

@@ -134,6 +134,28 @@ export function serviceAccountEnvelopeMaterial(
 }
 
 /**
+ * SHA-256 fingerprint of the PKCS8 body (hex), whitespace-insensitive. Used
+ * by duplicate detection when private_key_id is missing on either side —
+ * an empty key id can never prove two imports carry the same key.
+ */
+export async function serviceAccountKeyFingerprint(
+  privateKeyPem: string,
+): Promise<string> {
+  const match =
+    /-----BEGIN PRIVATE KEY-----\s*([A-Za-z0-9+/=\r\n]+?)\s*-----END PRIVATE KEY-----/.exec(
+      privateKeyPem,
+    );
+  const body = (match?.[1] ?? privateKeyPem).replace(/\s+/g, '');
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(body),
+  );
+  return [...new Uint8Array(digest)]
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+/**
  * Google OAuth Web client ids embed the owning project number:
  * `<project-number>-<random>.apps.googleusercontent.com`. Used when the
  * admin does not supply projectId explicitly; anything else returns null
@@ -203,6 +225,31 @@ export async function listServiceAccounts(
     .prepare(`SELECT ${SA_COLUMNS} FROM service_accounts ORDER BY created_at, id`)
     .all<ServiceAccountRecord>();
   return (rows.results ?? []).map(toServiceAccountRow);
+}
+
+/**
+ * Fetch many service accounts by id with IN() chunks (D1 binds at most ~100
+ * parameters per query), so bulk operations never run a per-id lookup loop.
+ * Rows come back keyed by id in a Map — request order is the caller's.
+ */
+export async function listServiceAccountsByIds(
+  db: D1Database,
+  ids: readonly string[],
+): Promise<Map<string, ServiceAccountRow>> {
+  const unique = [...new Set(ids)];
+  const found = new Map<string, ServiceAccountRow>();
+  for (let offset = 0; offset < unique.length; offset += 90) {
+    const chunk = unique.slice(offset, offset + 90);
+    const placeholders = chunk.map(() => '?').join(', ');
+    const rows = await db
+      .prepare(`SELECT ${SA_COLUMNS} FROM service_accounts WHERE id IN (${placeholders})`)
+      .bind(...chunk)
+      .all<ServiceAccountRecord>();
+    for (const row of rows.results ?? []) {
+      found.set(row.id, toServiceAccountRow(row));
+    }
+  }
+  return found;
 }
 
 export function serviceAccountView(row: ServiceAccountRow): ServiceAccountView {

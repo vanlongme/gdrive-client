@@ -52,9 +52,12 @@ type LoadState<T> =
 export function MountsSection({
   prefill = null,
   onPrefillConsumed,
+  grantsFocus = null,
 }: {
   prefill?: MountDrivePrefill | null;
   onPrefillConsumed?: () => void;
+  /** Wave-10 deep-link: select this mount's grants panels once mounts load. */
+  grantsFocus?: { mountId: string; nonce: number } | null;
 }) {
   const { t } = useI18n();
   const [mounts, setMounts] = useState<LoadState<MountAdminView[]>>({
@@ -109,6 +112,17 @@ export function MountsSection({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Wave-10: the SA section links here after a pool add so the admin lands
+  // on the mount whose read-grants sync they were asked to run.
+  const grantsAreaRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (grantsFocus === null || mounts.status !== "ready") return;
+    if (mounts.value.some((m) => m.id === grantsFocus.mountId)) {
+      setSelectedMountId(grantsFocus.mountId);
+      grantsAreaRef.current?.scrollIntoView({ block: "start" });
+    }
+  }, [grantsFocus, mounts]);
 
   const connLabel = useCallback(
     (id: string) => {
@@ -242,11 +256,13 @@ export function MountsSection({
           />
 
           {mounts.value.length > 0 ? (
-            <GrantsPanel
-              mounts={mounts.value}
-              mountId={selectedMountId}
-              onSelectMount={setSelectedMountId}
-            />
+            <div ref={grantsAreaRef}>
+              <GrantsPanel
+                mounts={mounts.value}
+                mountId={selectedMountId}
+                onSelectMount={setSelectedMountId}
+              />
+            </div>
           ) : null}
           {selectedMount !== undefined &&
           selectedMount.kind === "my_drive_folder" ? (

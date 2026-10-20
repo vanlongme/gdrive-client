@@ -41,6 +41,12 @@ export async function purgeCoordinatorMaintenance(
 }
 
 export interface CoordinatorHealth {
+  /**
+   * false when the coordinator DO did not answer — the cooldown set is then
+   * unknown, not empty; callers that display cooldowns must not treat a
+   * failed check as "not cooling down".
+   */
+  readonly ok: boolean;
   readonly cooldowns: readonly {
     scope_key: string;
     failures: number;
@@ -106,11 +112,11 @@ export function createCoordinatorTokenSource(
     async health(projectId) {
       try {
         const res = await stub(projectId).fetch(`${DO_ORIGIN}/health`);
-        if (!res.ok) return { cooldowns: [] };
-        const parsed = (await res.json()) as CoordinatorHealth;
-        return { cooldowns: parsed.cooldowns ?? [] };
+        if (!res.ok) return { ok: false, cooldowns: [] };
+        const parsed = (await res.json()) as { cooldowns?: CoordinatorHealth['cooldowns'] };
+        return { ok: true, cooldowns: parsed.cooldowns ?? [] };
       } catch {
-        return { cooldowns: [] };
+        return { ok: false, cooldowns: [] };
       }
     },
   };

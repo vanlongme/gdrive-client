@@ -50,6 +50,12 @@ export function AdminPage() {
   const [mountPrefill, setMountPrefill] = useState<MountDrivePrefill | null>(
     null,
   );
+  // SA bulk "add to pool" hands a My Drive mount to the grants panel
+  // (wave 10): selecting the mount focuses its read-grants sync UI.
+  const [grantsFocus, setGrantsFocus] = useState<{
+    mountId: string;
+    nonce: number;
+  } | null>(null);
 
   // The onboarding Shared Drive chooser hands the picked drive to the mount
   // create form; My Drive folders are picked inside the form itself.
@@ -112,11 +118,19 @@ export function AdminPage() {
       ) : null}
       {section === "site" ? <SiteSection /> : null}
       {section === "connections" ? <ConnectionsSection /> : null}
-      {section === "serviceAccounts" ? <ServiceAccountsSection /> : null}
+      {section === "serviceAccounts" ? (
+        <ServiceAccountsSection
+          onShowMountGrants={(mountId) => {
+            setGrantsFocus({ mountId, nonce: Date.now() });
+            setSection("mounts");
+          }}
+        />
+      ) : null}
       {section === "mounts" ? (
         <MountsSection
           prefill={mountPrefill}
           onPrefillConsumed={() => setMountPrefill(null)}
+          grantsFocus={grantsFocus}
         />
       ) : null}
       {section === "users" ? <UsersSection /> : null}

@@ -171,6 +171,7 @@ export function statusForApiCode(code: ApiErrorCode): number {
     case 'UPLOAD_NEEDS_RECONCILIATION':
     case 'MOUNT_KIND_UNSUPPORTED':
     case 'PUBLIC_LINK_CONFLICT':
+    case 'READ_POOL_CONFLICT':
       return 409;
     case 'PUBLIC_LINK_EXPIRED':
       return 410;

@@ -3,7 +3,10 @@ import {
   MountAdminResponseSchema,
   MountGrantListResponseSchema,
   OAuthClientResponseSchema,
+  ServiceAccountBulkResponseSchema,
+  ServiceAccountImportResponseSchema,
   ServiceAccountListResponseSchema,
+  ServiceAccountOverviewResponseSchema,
   ServiceAccountResponseSchema,
   UserListResponseSchema,
   UserResponseSchema,
@@ -169,7 +172,35 @@ export function importServiceAccount(body: ImportServiceAccountRequest) {
   return apiFetch("/api/v1/admin/service-accounts", {
     method: "POST",
     jsonBody: body,
-  }).then((res) => parseJson(res, ServiceAccountResponseSchema));
+  }).then((res) => parseJson(res, ServiceAccountImportResponseSchema));
+}
+
+/** Wave-10 SA-management projection: mounts, grant states and cooldowns. */
+export function getServiceAccountsOverview(signal?: AbortSignal) {
+  return apiFetch("/api/v1/admin/service-accounts/overview", { signal }).then(
+    (res) => parseJson(res, ServiceAccountOverviewResponseSchema),
+  );
+}
+
+export function bulkSetServiceAccounts(action: "enable" | "disable", ids: string[]) {
+  return apiFetch("/api/v1/admin/service-accounts/bulk", {
+    method: "POST",
+    jsonBody: { action, ids },
+  }).then((res) => parseJson(res, ServiceAccountBulkResponseSchema));
+}
+
+export function addToReadPool(mountId: string, serviceAccountIds: string[]) {
+  return apiFetch(`/api/v1/admin/mounts/${enc(mountId)}/read-pool/add`, {
+    method: "POST",
+    jsonBody: { serviceAccountIds },
+  }).then((res) => parseJson(res, MountAdminResponseSchema));
+}
+
+export function removeFromReadPool(mountId: string, serviceAccountIds: string[]) {
+  return apiFetch(`/api/v1/admin/mounts/${enc(mountId)}/read-pool/remove`, {
+    method: "POST",
+    jsonBody: { serviceAccountIds },
+  }).then((res) => parseJson(res, MountAdminResponseSchema));
 }
 
 export function setServiceAccountEnabled(id: string, enabled: boolean) {

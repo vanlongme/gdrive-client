@@ -82,6 +82,8 @@ export function messageKeyForError(error: unknown): {
       return { key: "errors.bootstrapSecrets", ...base };
     case "IDEMPOTENCY_CONFLICT":
       return { key: "errors.idempotencyConflict", ...base };
+    case "READ_POOL_CONFLICT":
+      return { key: "errors.readPoolConflict", ...base };
     case "INTERNAL_ERROR":
       return { key: "errors.internal", ...base };
     case "UNEXPECTED_RESPONSE":

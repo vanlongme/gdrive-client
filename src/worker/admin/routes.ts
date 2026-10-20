@@ -32,6 +32,8 @@ import {
   CreateMountRequestSchema,
   ImportOAuthClientRequestSchema,
   ImportServiceAccountRequestSchema,
+  ModifyReadPoolRequestSchema,
+  ServiceAccountBulkRequestSchema,
   SetReadPoolRequestSchema,
   UpdateMountRequestSchema,
   UpsertMountGrantRequestSchema,
@@ -39,6 +41,8 @@ import {
   type MountGrantView,
   type OAuthClientView,
   type ProviderHealthView,
+  type ServiceAccountOverviewEntry,
+  type ServiceAccountOverviewGrantState,
   type ServiceAccountView,
   type UserView,
 } from '../../shared/contracts/admin';
@@ -47,7 +51,11 @@ import {
   requireAdmin as realRequireAdmin,
   getAuthInstance,
 } from '../auth/session';
-import { createVaultKeyring, encodeEnvelope } from '../security/vault';
+import {
+  createVaultKeyring,
+  decodeEnvelope,
+  encodeEnvelope,
+} from '../security/vault';
 import {
   oauthClientSecretContext,
   serviceAccountKeyContext,
@@ -80,12 +88,15 @@ import { readGrantCounts } from '../drive/read-grants';
 import {
   clientProjectFromClientId,
   listServiceAccounts,
+  listServiceAccountsByIds,
   parseServiceAccountKeyJson,
   readServiceAccount,
   readServiceAccountByIdentity,
   serviceAccountEnvelopeMaterial,
+  serviceAccountKeyFingerprint,
   serviceAccountView,
   validatePkcs8RsaPrivateKey,
+  type ServiceAccountRow,
 } from './credentials';
 
 export interface AdminIdentity {
@@ -176,7 +187,7 @@ function iso(ms: number): string {
 // (spec §10.1 audit_events). Never carries secret material.
 // ---------------------------------------------------------------------------
 
-export async function recordAudit(
+export function auditStatement(
   db: D1Database,
   fields: {
     requestId: string;
@@ -187,25 +198,31 @@ export async function recordAudit(
     result: 'ok' | 'error';
     nowMs: number;
   },
+): D1PreparedStatement {
+  return db
+    .prepare(
+      'INSERT INTO audit_events ' +
+        '(id, actor_kind, actor_user_id, operation, target_type, target_id, result, request_id, created_at) ' +
+        "VALUES (?, 'user', ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(
+      crypto.randomUUID(),
+      fields.actorUserId,
+      fields.operation,
+      fields.targetType ?? null,
+      fields.targetId ?? null,
+      fields.result,
+      fields.requestId,
+      fields.nowMs,
+    );
+}
+
+export async function recordAudit(
+  db: D1Database,
+  fields: Parameters<typeof auditStatement>[1],
 ): Promise<void> {
   try {
-    await db
-      .prepare(
-        'INSERT INTO audit_events ' +
-          '(id, actor_kind, actor_user_id, operation, target_type, target_id, result, request_id, created_at) ' +
-          "VALUES (?, 'user', ?, ?, ?, ?, ?, ?, ?)",
-      )
-      .bind(
-        crypto.randomUUID(),
-        fields.actorUserId,
-        fields.operation,
-        fields.targetType ?? null,
-        fields.targetId ?? null,
-        fields.result,
-        fields.requestId,
-        fields.nowMs,
-      )
-      .run();
+    await auditStatement(db, fields).run();
   } catch {
     // Audit must never mask the operation's real outcome.
   }
@@ -497,14 +514,69 @@ async function assertServiceAccountsExist(
   db: D1Database,
   ids: readonly string[],
 ): Promise<void> {
-  for (const id of new Set(ids)) {
-    if ((await readServiceAccount(db, id)) === null) {
-      throw new ApiRequestError(
-        400,
-        'VALIDATION_FAILED',
-        `Service account ${id} does not exist.`,
-      );
+  // One IN() query per chunk: bulk callers pass up to 200 ids and a per-id
+  // lookup loop would be N+1 (D1 binds at most ~100 parameters per query).
+  const unique = [...new Set(ids)];
+  for (let offset = 0; offset < unique.length; offset += 90) {
+    const chunk = unique.slice(offset, offset + 90);
+    const placeholders = chunk.map(() => '?').join(', ');
+    const rows = await db
+      .prepare(`SELECT id FROM service_accounts WHERE id IN (${placeholders})`)
+      .bind(...chunk)
+      .all<{ id: string }>();
+    const found = new Set((rows.results ?? []).map((r) => r.id));
+    for (const id of chunk) {
+      if (!found.has(id)) {
+        throw new ApiRequestError(
+          400,
+          'VALIDATION_FAILED',
+          `Service account ${id} does not exist.`,
+        );
+      }
     }
+  }
+}
+
+/**
+ * Whether the stored credential provably holds the same key as the import:
+ * same non-empty private_key_id, or — when either side lacks one — the same
+ * key-material fingerprint (unsealed server-side, never returned). Any doubt
+ * answers false so the caller reports 'conflict' instead of silently
+ * skipping (review L1) or rotating (review M3).
+ */
+async function sameStoredKey(
+  db: D1Database,
+  vault: ReturnType<typeof createVaultKeyring>,
+  existing: ServiceAccountRow,
+  key: { privateKey: string; privateKeyId: string | null },
+): Promise<boolean> {
+  const storedKeyId = existing.keyId;
+  const incomingKeyId = key.privateKeyId ?? '';
+  if (storedKeyId !== '' && incomingKeyId !== '') {
+    return storedKeyId === incomingKeyId;
+  }
+  try {
+    const row = await db
+      .prepare('SELECT envelope FROM service_accounts WHERE id = ?')
+      .bind(existing.id)
+      .first<{ envelope: string }>();
+    if (row === null) return false;
+    const plaintext = await vault.openSecret(
+      decodeEnvelope(row.envelope),
+      serviceAccountKeyContext(existing.id, existing.projectId),
+    );
+    const material = JSON.parse(
+      new TextDecoder().decode(plaintext),
+    ) as { private_key?: unknown };
+    if (typeof material.private_key !== 'string') return false;
+    const [stored, incoming] = await Promise.all([
+      serviceAccountKeyFingerprint(material.private_key),
+      serviceAccountKeyFingerprint(key.privateKey),
+    ]);
+    return stored === incoming;
+  } catch {
+    // An unsealable or malformed envelope cannot prove sameness — conflict.
+    return false;
   }
 }
 
@@ -758,8 +830,22 @@ export function createAdminRouter(deps: AdminRouterDeps = {}) {
         key.projectId,
         key.clientEmail,
       );
+      // duplicatePolicy 'skip' never writes: 'duplicate' only when the
+      // identity provably holds the same key, 'conflict' when it holds a
+      // different one (rotation is an explicit client choice, never silent).
+      if (parsed.data.duplicatePolicy === 'skip' && existing !== null) {
+        const outcome = await sameStoredKey(c.env.DB, vault, existing, key)
+          ? 'duplicate'
+          : 'conflict';
+        return c.json({
+          serviceAccount: serviceAccountView(existing),
+          outcome,
+        });
+      }
+      let outcome: 'imported' | 'rotated';
       let saId: string;
       if (existing !== null) {
+        outcome = 'rotated';
         saId = existing.id;
         const envelope = encodeEnvelope(
           await vault.sealSecret(
@@ -777,6 +863,7 @@ export function createAdminRouter(deps: AdminRouterDeps = {}) {
           bumpReadPoolVersion(c.env.DB, saId, now()),
         ]);
       } else {
+        outcome = 'imported';
         saId = crypto.randomUUID();
         const envelope = encodeEnvelope(
           await vault.sealSecret(
@@ -832,7 +919,7 @@ export function createAdminRouter(deps: AdminRouterDeps = {}) {
       if (row === null) {
         return fail(c, 500, 'INTERNAL_ERROR', 'Service account was not persisted.');
       }
-      return c.json({ serviceAccount: serviceAccountView(row) });
+      return c.json({ serviceAccount: serviceAccountView(row), outcome });
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -888,6 +975,228 @@ export function createAdminRouter(deps: AdminRouterDeps = {}) {
       }
     });
   }
+
+  // -------------------------------------------------------------------------
+  // GET /service-accounts/overview (wave 10): the SA-management projection —
+  // every SA with its pool memberships, per-My-Drive-mount grant state and
+  // live cooldown flag. Three constant D1 queries (accounts, memberships,
+  // grant rows) plus one coordinator.health per project — never N+1.
+  // -------------------------------------------------------------------------
+  app.get('/service-accounts/overview', async (c) => {
+    const auth = await adminOrResponse(c, requireAdmin);
+    if ('response' in auth) return auth.response;
+    try {
+      const serviceAccounts = await listServiceAccounts(c.env.DB);
+      const memberships = await c.env.DB
+        .prepare(
+          'SELECT c.service_account_id AS service_account_id, m.id AS mount_id, m.label AS label, m.drive_id AS drive_id ' +
+            'FROM mount_read_credentials c JOIN mounts m ON m.id = c.mount_id ' +
+            'ORDER BY m.label, m.id',
+        )
+        .all<{
+          service_account_id: string;
+          mount_id: string;
+          label: string;
+          drive_id: string | null;
+        }>();
+      const grantRows = await c.env.DB
+        .prepare(
+          'SELECT p.service_account_id AS service_account_id, p.mount_id AS mount_id, p.state AS state ' +
+            'FROM mount_drive_permissions p JOIN mounts m ON m.id = p.mount_id ' +
+            'WHERE m.drive_id IS NULL',
+        )
+        .all<{
+          service_account_id: string;
+          mount_id: string;
+          state: string;
+        }>();
+
+      const coordinator = createCoordinatorTokenSource(c.env);
+      const nowMs = now();
+      const cooldownUntil = new Map<string, number>();
+      const projectIds = [
+        ...new Set(serviceAccounts.map((sa) => sa.projectId)),
+      ];
+      // One health check per project, isolated: a project whose coordinator
+      // does not answer reports an UNKNOWN cooldown, never a 500 and never a
+      // false "not cooling down" (review M4).
+      const healthByProject = await Promise.allSettled(
+        projectIds.map((projectId) => coordinator.health(projectId)),
+      );
+      const unknownCooldownProjects = new Set<string>();
+      healthByProject.forEach((settled, index) => {
+        const projectId = projectIds[index]!;
+        if (settled.status === 'rejected' || !settled.value.ok) {
+          unknownCooldownProjects.add(projectId);
+          return;
+        }
+        for (const cooldown of settled.value.cooldowns) {
+          if (
+            cooldown.until_ms > nowMs &&
+            cooldown.scope_key.startsWith('cred:service_account:')
+          ) {
+            const id = cooldown.scope_key.slice('cred:service_account:'.length);
+            cooldownUntil.set(
+              id,
+              Math.max(cooldown.until_ms, cooldownUntil.get(id) ?? 0),
+            );
+          }
+        }
+      });
+
+      const mountsByAccount = new Map<
+        string,
+        { id: string; label: string; myDrive: boolean }[]
+      >();
+      for (const row of memberships.results ?? []) {
+        const list = mountsByAccount.get(row.service_account_id) ?? [];
+        list.push({
+          id: row.mount_id,
+          label: row.label,
+          myDrive: row.drive_id === null,
+        });
+        mountsByAccount.set(row.service_account_id, list);
+      }
+      const grantStateByAccount = new Map<
+        string,
+        Map<string, ServiceAccountOverviewGrantState>
+      >();
+      for (const row of grantRows.results ?? []) {
+        const states =
+          grantStateByAccount.get(row.service_account_id) ?? new Map();
+        states.set(
+          row.mount_id,
+          row.state as ServiceAccountOverviewGrantState,
+        );
+        grantStateByAccount.set(row.service_account_id, states);
+      }
+
+      const entries: ServiceAccountOverviewEntry[] = serviceAccounts.map(
+        (sa) => {
+          const membershipsFor = mountsByAccount.get(sa.id) ?? [];
+          const grantStates = grantStateByAccount.get(sa.id);
+          const until = cooldownUntil.get(sa.id);
+          const cooldownUnknown = unknownCooldownProjects.has(sa.projectId);
+          return {
+            ...serviceAccountView(sa),
+            coolingDown: cooldownUnknown ? null : until !== undefined,
+            cooldownUntil: until === undefined ? null : iso(until),
+            mounts: membershipsFor.map(({ id, label }) => ({ id, label })),
+            grants: membershipsFor
+              .filter((membership) => membership.myDrive)
+              .map((membership) => ({
+                mountId: membership.id,
+                state: grantStates?.get(membership.id) ?? 'none',
+              })),
+          };
+        },
+      );
+      return c.json({ serviceAccounts: entries });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // POST /service-accounts/bulk — enable/disable up to 200 ids with the same
+  // per-account semantics as the single endpoints (version bump only on a
+  // real flag change, read-pool invalidation, audit per processed id). Every
+  // requested id yields an explicit result; unknown ids are NOT_FOUND.
+  // -------------------------------------------------------------------------
+  app.post('/service-accounts/bulk', async (c) => {
+    const auth = await adminOrResponse(c, requireAdmin);
+    if ('response' in auth) return auth.response;
+    const parsed = await parseBody(c, ServiceAccountBulkRequestSchema);
+    if ('response' in parsed) return parsed.response;
+    const { action, ids } = parsed.data;
+    const want = action === 'enable';
+    const uniqueIds = [...new Set(ids)];
+
+    try {
+      const rowsById = await listServiceAccountsByIds(c.env.DB, uniqueIds);
+
+      const requestId = c.get('requestId') ?? crypto.randomUUID();
+      const failed = new Set<string>();
+      // ≤25 ids per batch => at most 3 statements per id (update, pool
+      // version bump is per changed id, audit batched separately) — well
+      // inside D1's per-batch bound while keeping each chunk atomic.
+      for (let offset = 0; offset < uniqueIds.length; offset += 25) {
+        const chunk = uniqueIds.slice(offset, offset + 25);
+        const statements: D1PreparedStatement[] = [];
+        for (const id of chunk) {
+          const row = rowsById.get(id);
+          if (row === undefined || row.enabled === want) continue;
+          statements.push(
+            c.env.DB
+              .prepare(
+                'UPDATE service_accounts SET enabled = ?, version = version + 1, updated_at = ? WHERE id = ?',
+              )
+              .bind(want ? 1 : 0, now(), id),
+            bumpReadPoolVersion(c.env.DB, id, now()),
+          );
+        }
+        if (statements.length > 0) {
+          try {
+            await c.env.DB.batch(statements);
+          } catch {
+            for (const id of chunk) {
+              if (rowsById.has(id)) failed.add(id);
+            }
+            continue;
+          }
+        }
+        const audits = chunk
+          .filter((id) => rowsById.has(id))
+          .map((id) =>
+            auditStatement(c.env.DB, {
+              requestId,
+              actorUserId: auth.admin.userId,
+              operation: `admin.service-account.${action}`,
+              targetType: 'service_account',
+              targetId: id,
+              result: 'ok',
+              nowMs: now(),
+            }),
+          );
+        try {
+          await c.env.DB.batch(audits);
+        } catch {
+          // Audit must never mask the operation's real outcome.
+        }
+      }
+
+      // Re-read the rows after the batches: every reported view is the
+      // post-write state, never a synthesized pre-read snapshot (review L2).
+      const fresh = await listServiceAccountsByIds(c.env.DB, uniqueIds);
+      const results = ids.map((id) => {
+        const row = rowsById.get(id);
+        if (row === undefined) {
+          return {
+            id,
+            ok: false,
+            code: 'NOT_FOUND',
+            message: 'Service account not found.',
+          };
+        }
+        if (failed.has(id)) {
+          return {
+            id,
+            ok: false,
+            code: 'INTERNAL_ERROR',
+            message: 'The update could not be persisted.',
+          };
+        }
+        return {
+          id,
+          ok: true,
+          serviceAccount: serviceAccountView(fresh.get(id) ?? row),
+        };
+      });
+      return c.json({ results });
+    } catch (err) {
+      return errorResponse(c, err);
+    }
+  });
 
   // -------------------------------------------------------------------------
   // Mounts.
@@ -1114,6 +1423,128 @@ export function createAdminRouter(deps: AdminRouterDeps = {}) {
       return errorResponse(c, err);
     }
   });
+
+  // -------------------------------------------------------------------------
+  // POST /mounts/:id/read-pool/add|remove — incremental pool edits (wave 10).
+  // Same validation as the PUT replace (every id must exist), one atomic
+  // batch and exactly one readPoolVersion bump per call. Add keeps the
+  // default priority/weight for new members and never rewrites existing
+  // rows; removing a non-member is a valid no-op (the PUT bumps
+  // unconditionally too). The 100-member cap and every write are guarded by
+  // the snapshot read_pool_version, so a concurrent pool edit can never
+  // interleave into a partial write — the loser answers 409
+  // READ_POOL_CONFLICT with zero rows changed. My Drive grant rows are left
+  // for the read-grants sync to converge, exactly as under the PUT.
+  // -------------------------------------------------------------------------
+  for (const op of ['add', 'remove'] as const) {
+    app.post(`/mounts/:id/read-pool/${op}`, async (c) => {
+      const auth = await adminOrResponse(c, requireAdmin);
+      if ('response' in auth) return auth.response;
+      const parsed = await parseBody(c, ModifyReadPoolRequestSchema);
+      if ('response' in parsed) return parsed.response;
+
+      try {
+        const mount = await getMount(c.env.DB, c.req.param('id'));
+        if (mount === null) return fail(c, 404, 'NOT_FOUND', 'Mount not found.');
+        const ids = [...new Set(parsed.data.serviceAccountIds)];
+        await assertServiceAccountsExist(c.env.DB, ids);
+
+        // One consistent snapshot: pool version and member set read
+        // together. Every write in the batch below re-checks this version,
+        // so a concurrent pool edit landing between this read and the batch
+        // turns the whole write into a no-op answered 409.
+        const snapshot = (
+          await c.env.DB
+            .prepare(
+              'SELECT m.read_pool_version AS version, c.service_account_id AS member_id ' +
+                'FROM mounts m LEFT JOIN mount_read_credentials c ON c.mount_id = m.id ' +
+                'WHERE m.id = ?',
+            )
+            .bind(mount.id)
+            .all<{ version: number; member_id: string | null }>()
+        ).results ?? [];
+        const poolVersion = snapshot[0]?.version ?? mount.readPoolVersion;
+        const members = new Set(
+          snapshot
+            .map((r) => r.member_id)
+            .filter((id): id is string => id !== null),
+        );
+
+        const nowMs = now();
+        const statements: D1PreparedStatement[] = [];
+        if (op === 'add') {
+          // A pool holds at most 100 members (same cap as the PUT replace).
+          // Only ids that are not already members take a seat.
+          const seats = ids.filter((id) => !members.has(id)).length;
+          if (members.size + seats > 100) {
+            return fail(
+              c,
+              400,
+              'VALIDATION_FAILED',
+              'A read pool holds at most 100 service accounts.',
+            );
+          }
+          for (const id of ids) {
+            statements.push(
+              c.env.DB
+                .prepare(
+                  'INSERT INTO mount_read_credentials (mount_id, service_account_id, priority, weight, created_at) ' +
+                    'SELECT ?, ?, 0, 1, ? ' +
+                    'WHERE (SELECT read_pool_version FROM mounts WHERE id = ?) = ? ' +
+                    'ON CONFLICT (mount_id, service_account_id) DO NOTHING',
+                )
+                .bind(mount.id, id, nowMs, mount.id, poolVersion),
+            );
+          }
+        } else {
+          for (let offset = 0; offset < ids.length; offset += 90) {
+            const chunk = ids.slice(offset, offset + 90);
+            const placeholders = chunk.map(() => '?').join(', ');
+            statements.push(
+              c.env.DB
+                .prepare(
+                  `DELETE FROM mount_read_credentials WHERE mount_id = ? AND service_account_id IN (${placeholders}) ` +
+                    'AND (SELECT read_pool_version FROM mounts WHERE id = ?) = ?',
+                )
+                .bind(mount.id, ...chunk, mount.id, poolVersion),
+            );
+          }
+        }
+        // The bump is the batch's commit sentinel and runs last: when the
+        // pool moved since the snapshot it changes 0 rows — as did every
+        // conditioned write above — and the caller reloads and retries.
+        statements.push(
+          c.env.DB
+            .prepare(
+              'UPDATE mounts SET read_pool_version = read_pool_version + 1, updated_at = ? WHERE id = ? AND read_pool_version = ?',
+            )
+            .bind(nowMs, mount.id, poolVersion),
+        );
+        const results = await c.env.DB.batch(statements);
+        if ((results.at(-1)?.meta.changes ?? 0) === 0) {
+          return fail(
+            c,
+            409,
+            'READ_POOL_CONFLICT',
+            'The read pool changed while the request ran. Reload and retry.',
+          );
+        }
+        await recordAudit(c.env.DB, {
+          requestId: c.get('requestId') ?? crypto.randomUUID(),
+          actorUserId: auth.admin.userId,
+          operation: `admin.mount.read-pool.${op}`,
+          targetType: 'mount',
+          targetId: mount.id,
+          result: 'ok',
+          nowMs,
+        });
+        const updated = await getMount(c.env.DB, mount.id);
+        return c.json({ mount: await mountAdminView(c.env.DB, updated ?? mount) });
+      } catch (err) {
+        return errorResponse(c, err);
+      }
+    });
+  }
 
   // -------------------------------------------------------------------------
   // Grants.
