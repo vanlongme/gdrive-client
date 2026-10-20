@@ -54,7 +54,16 @@ import type {
   OAuthCatalogWriteProvider,
 } from './types';
 import { recordCatalogQuery } from '../admin/metrics';
-import { requestTokenMemo, timedTokenSource, timingFor } from '../timing';
+import {
+  createFileMetadataCache,
+  rowsFromCatalogEntries,
+} from './metadata-cache';
+import {
+  defer,
+  requestTokenMemo,
+  timedTokenSource,
+  timingFor,
+} from '../timing';
 import {
   ApiRequestError,
   actorKey,
@@ -498,6 +507,16 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
           recordCatalogQuery('list', Date.now() - startedMs);
         }
         cache.set(key, page);
+        // Wave-10 fill (off the critical path): listing metadata feeds the
+        // content-open cache; only freshly fetched pages write. fetchedAt
+        // is the fetch START so an invalidation mid-flight tombstones this
+        // data out of the fill (review L2).
+        defer(
+          c,
+          createFileMetadataCache(c.env.DB).put(
+            rowsFromCatalogEntries(mount.id, page.entries, now(), startedMs),
+          ),
+        );
       }
 
       const body = {
@@ -665,8 +684,9 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
       let page = cache.get(key);
       if (page === undefined) {
         const startedMs = Date.now();
+        let result: CatalogPage;
         try {
-          page = wholeMountSearch
+          result = wholeMountSearch
             ? await searchMyDriveMount({
                 provider,
                 writer,
@@ -688,7 +708,16 @@ export function createCatalogRouter(deps: CatalogRouterDeps = {}) {
         } finally {
           recordCatalogQuery('search', Date.now() - startedMs);
         }
+        page = result;
         cache.set(key, page);
+        // Wave-10 fill: scoped search results feed the same cache; the
+        // fetch-start time guards against a racing invalidation (L2).
+        defer(
+          c,
+          createFileMetadataCache(c.env.DB).put(
+            rowsFromCatalogEntries(mount.id, page.entries, now(), startedMs),
+          ),
+        );
       }
 
       const body = {

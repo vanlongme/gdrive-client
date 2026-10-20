@@ -61,6 +61,7 @@ async function resetState() {
     'verification',
     'rateLimit',
     'containment_verdicts',
+    'file_metadata_cache', 'file_metadata_tombstones',
     'mounts',
   ]) {
     await env.DB.prepare(`DELETE FROM "${table}"`).run();

@@ -333,6 +333,7 @@ async function resetState() {
     'mount_read_credentials',
     'file_readiness',
     'containment_verdicts',
+    'file_metadata_cache', 'file_metadata_tombstones',
     'mounts',
     'upload_batches',
     'upload_batch_nodes',

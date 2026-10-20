@@ -78,6 +78,7 @@ const saFixture: ServiceAccountContentReadProvider = {
 
 async function reset() {
   for (const t of ['mount_drive_permissions', 'audit_events', 'file_readiness', 'public_link_unlock_attempts', 'public_folder_links', 'site_branding', 'share_links', 'mount_grants', 'mount_read_credentials', 'service_accounts', 'containment_verdicts',
+    'file_metadata_cache', 'file_metadata_tombstones',
     'mounts', 'google_connections', 'google_oauth_clients', 'session', 'account', 'user', 'app_settings']) {
     await env.DB.prepare(`DELETE FROM "${t}"`).run();
   }

@@ -60,6 +60,7 @@ async function resetState() {
     'mount_read_credentials',
     'service_accounts',
     'containment_verdicts',
+    'file_metadata_cache', 'file_metadata_tombstones',
     'mounts',
     'google_connections',
     'google_oauth_clients',

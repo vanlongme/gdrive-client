@@ -143,7 +143,8 @@ async function resetState() {
   for (const t of [
     'mount_drive_permissions', 'mount_read_credentials', 'mount_grants',
     'service_accounts', 'mounts', 'google_connections', 'google_oauth_clients',
-    'containment_verdicts', 'app_settings', 'session', 'account', 'user',
+    'containment_verdicts',
+    'file_metadata_cache', 'file_metadata_tombstones', 'app_settings', 'session', 'account', 'user',
   ]) {
     await env.DB.prepare(`DELETE FROM "${t}"`).run();
   }
@@ -266,6 +267,36 @@ describe('wave-9 upstream call counts', () => {
     report(
       `/thumbnail status=${res.status} ` +
         `d1=${h.d1.count()} admits=${h.ts.calls.length} google=${h.g.calls.length} cc=${res.headers.get('cache-control')}`,
+    );
+  });
+
+  it('GET /content (shared drive): the second open hits the wave-10 metadata cache', async () => {
+    await resetState();
+    resetContainmentCacheForTests();
+    await seed('drive-1');
+    const h = harness(true);
+    const res1 = await h.api('/api/v1/mounts/m-1/files/f-2/content');
+    expect(res1.status).toBe(200);
+    await res1.arrayBuffer();
+    // Miss: SA meta + media.
+    expect(h.g.calls.length).toBe(2);
+    // The sa_meta fill is deferred — wait for the row before the second open.
+    let row: unknown = null;
+    for (let i = 0; i < 30 && row === null; i++) {
+      row = await env.DB.prepare(
+        'SELECT file_id FROM file_metadata_cache WHERE mount_id = ? AND file_id = ?',
+      ).bind('m-1', 'f-2').first();
+      if (row === null) await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(row).not.toBeNull();
+    const res2 = await h.api('/api/v1/mounts/m-1/files/f-2/content');
+    expect(res2.status).toBe(200);
+    await res2.arrayBuffer();
+    // Hit: media only — the SA files.get is gone.
+    expect(h.g.calls.length).toBe(3);
+    report(
+      `shared-drive /content second-open: ` +
+        `d1=${h.d1.count()} admits=${h.ts.calls.length} google=${h.g.calls.length} (hit: +1 google)`,
     );
   });
 

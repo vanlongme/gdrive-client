@@ -16,6 +16,7 @@ import {
 import type { DriveTransport, TransportRequest } from '../transport';
 import type {
   CatalogEntry,
+  TokenFailureKind,
   CatalogPage,
   CoordinatorTokenSource,
   DriveFileMeta,
@@ -46,10 +47,15 @@ export const FILE_META_FIELDS = [
   'capabilities(canDownload,canAddChildren,canTrash,canReadRevisions)',
 ].join(',');
 
-/** Listing/search fields; thumbnail presence only, never the URL. */
+/**
+ * Listing/search fields; thumbnail presence only, never the URL. The extra
+ * fields (trashed/driveId/md5/headRevision/copyRequiresWriterPermission/
+ * downloadRestrictions) feed the wave-10 metadata cache — the reader
+ * download verdict needs the restriction fields exactly.
+ */
 export const FILE_LIST_FIELDS = [
   'nextPageToken',
-  'files(id,name,mimeType,size,modifiedTime,parents,shortcutDetails(targetId,targetMimeType,targetResourceKey),resourceKey,thumbnailLink)',
+  'files(id,name,mimeType,size,modifiedTime,trashed,parents,driveId,md5Checksum,headRevisionId,copyRequiresWriterPermission,downloadRestrictions,shortcutDetails(targetId,targetMimeType,targetResourceKey),resourceKey,thumbnailLink)',
 ].join(',');
 
 /** SA metadata fields incl. read-side capabilities (spec §7.1). */
@@ -99,7 +105,20 @@ export async function callDriveApi<T>(
   identity: TokenIdentity,
   operation: string,
   run: (bearer: string) => Promise<T>,
-  options: { hasStreamBody?: boolean; fileId?: string; signal?: AbortSignal } = {},
+  options: {
+    hasStreamBody?: boolean;
+    fileId?: string;
+    signal?: AbortSignal;
+    /**
+     * Failure reports that must not be sent back to the coordinator for
+     * this call (wave-10 review M2/round-2): a media open that relied on
+     * cached — not live-verified — metadata can hit a denial class the
+     * cached verdict caused, so the caller supplies a predicate that sees
+     * the error and its failure kind and decides per report (e.g. only
+     * 'cannotDownloadFile' suppresses; real per-file caps still report).
+     */
+    suppressReport?: (err: DriveError, kind: TokenFailureKind) => boolean;
+  } = {},
 ): Promise<T> {
   const admission =
     options.fileId === undefined ? undefined : { fileId: options.fileId };
@@ -115,8 +134,14 @@ export async function callDriveApi<T>(
       if (!(err instanceof DriveError)) throw err;
       const failureKind = failureKindForDriveError(err);
       // A call that was already aborted never reports: a denied request's
-      // speculated media open must not push the SA into cooldown (M4).
-      if (failureKind !== undefined && options.signal?.aborted !== true) {
+      // speculated media open must not push the SA into cooldown (M4). A
+      // suppressed report stays silent too — a cache-metadata open's
+      // denial may only prove the cached verdict stale (wave-10 review M2).
+      if (
+        failureKind !== undefined &&
+        options.signal?.aborted !== true &&
+        options.suppressReport?.(err, failureKind) !== true
+      ) {
         try {
           await tokenSource.reportFailure(identity, {
             kind: failureKind,
@@ -324,6 +349,52 @@ function parseCatalogEntry(json: unknown, operation: string): CatalogEntry {
       ? record.parents.filter((p): p is string => typeof p === 'string')
       : undefined,
     hasThumbnail: optionalString(record, 'thumbnailLink') !== undefined,
+    trashed: optionalBoolean(record, 'trashed'),
+    driveId: optionalString(record, 'driveId'),
+    md5Checksum: optionalString(record, 'md5Checksum'),
+    headRevisionId: optionalString(record, 'headRevisionId'),
+    copyRequiresWriterPermission: optionalBoolean(
+      record,
+      'copyRequiresWriterPermission',
+    ),
+    downloadRestrictions: parseDownloadRestrictions(record),
+  };
+}
+
+/**
+ * downloadRestrictions carries itemDownloadRestriction (owner/organizer
+ * applied) and effectiveDownloadRestrictionWithContext (item + shared
+ * drive settings + DLP). The cache verdict is the UNION: any restriction
+ * reported by either level counts. A verdict exists ONLY when both levels
+ * are present and each carries its booleans — a missing level or a key
+ * without boolean values is an unverifiable restriction state and must
+ * parse to no verdict (reader_can_download stays 0, review round-2).
+ */
+function parseDownloadRestrictions(
+  record: Record<string, unknown>,
+): CatalogEntry['downloadRestrictions'] {
+  const outer = record.downloadRestrictions;
+  if (typeof outer !== 'object' || outer === null) return undefined;
+  const item = (outer as Record<string, unknown>).itemDownloadRestriction;
+  const effective = (outer as Record<string, unknown>)
+    .effectiveDownloadRestrictionWithContext;
+  if (typeof item !== 'object' || item === null) return undefined;
+  if (typeof effective !== 'object' || effective === null) return undefined;
+  const i = item as Record<string, unknown>;
+  const e = effective as Record<string, unknown>;
+  if (
+    typeof i.restrictedForReaders !== 'boolean' ||
+    typeof i.restrictedForWriters !== 'boolean' ||
+    typeof e.restrictedForReaders !== 'boolean' ||
+    typeof e.restrictedForWriters !== 'boolean'
+  ) {
+    return undefined;
+  }
+  return {
+    restrictedForReaders:
+      i.restrictedForReaders === true || e.restrictedForReaders === true,
+    restrictedForWriters:
+      i.restrictedForWriters === true || e.restrictedForWriters === true,
   };
 }
 

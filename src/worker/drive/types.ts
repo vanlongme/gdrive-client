@@ -284,6 +284,19 @@ export interface CatalogEntry {
   /** Parent folder ids as listed (My Drive: at most one). Containment input only; never in a DTO. */
   readonly parents?: readonly string[];
   readonly hasThumbnail: boolean;
+  // Cache-fill fields (wave 10): requested in the listing fields so an
+  // OAuth page can populate file_metadata_cache. Never in public DTOs.
+  readonly trashed?: boolean;
+  readonly driveId?: string;
+  readonly md5Checksum?: string;
+  readonly headRevisionId?: string;
+  /** Legacy "viewers cannot download" flag (owner's view; reader verdict). */
+  readonly copyRequiresWriterPermission?: boolean;
+  /** Effective reader/writer download restriction (item + context). */
+  readonly downloadRestrictions?: {
+    readonly restrictedForReaders?: boolean;
+    readonly restrictedForWriters?: boolean;
+  };
 }
 
 export interface CatalogPage {
@@ -456,6 +469,15 @@ export interface OpenContentInput extends ProviderRequestContext {
   readonly range?: ByteRange;
   /** Present for pinned-revision reads (spec §7.3); never falls back to head. */
   readonly revisionId?: string;
+  /**
+   * True when the admission metadata this open relies on came from the
+   * metadata cache rather than a live SA files.get (wave-10 review M2): a
+   * file-scoped denial may only prove the cached verdict stale, so the
+   * 'file_limited' cooldown report is suppressed — the route re-verifies
+   * live and answers exactly what the live path returns. Rate-limit
+   * reports are unaffected.
+   */
+  readonly metaFromCache?: boolean;
 }
 
 export interface OpenThumbnailInput extends ProviderRequestContext {
@@ -465,9 +487,12 @@ export interface OpenThumbnailInput extends ProviderRequestContext {
    * The thumbnailLink already returned by the admission metadata (wave-9
    * step 2c): a string skips the second files.get entirely; `null` means
    * "known absent" and fails not-found without an upstream call; `undefined`
-   * preserves the legacy files.get fallback.
+   * preserves the legacy files.get fallback, which also re-proves
+   * capabilities(canDownload) before trusting the link (wave-10 review M3).
    */
   readonly thumbnailLink?: string | null;
+  /** Same semantics as OpenContentInput.metaFromCache. */
+  readonly metaFromCache?: boolean;
 }
 
 /** Workspace export formats the read provider may request (spec §7.1). */
@@ -478,6 +503,8 @@ export interface ExportDocumentInput extends ProviderRequestContext {
   readonly identity: ReadIdentity;
   readonly ref: DriveResourceRef;
   readonly format: ExportFormat;
+  /** Same semantics as OpenContentInput.metaFromCache. */
+  readonly metaFromCache?: boolean;
 }
 
 // ---------------------------------------------------------------------------

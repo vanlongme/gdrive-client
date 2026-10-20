@@ -47,6 +47,8 @@ import {
   linkRequestSignal,
   NON_FAILOVER_REASONS,
   openWithFailover,
+  mediaDenialError,
+  metaCacheFor,
   providerFor,
   requireDriveId,
   requireParam,
@@ -57,7 +59,7 @@ import {
   type ContentRouteDeps,
   type RouterContext,
 } from './content-access';
-import { timingFor } from '../timing';
+import { defer, timingFor } from '../timing';
 import type { ReadIdentity } from '../drive/types';
 import {
   buildContentDisposition,
@@ -256,12 +258,17 @@ async function handleContent(c: RouterContext, deps: ContentRouteDeps) {
     let earlyMedia: Promise<UpstreamContent> | undefined;
     let earlyIdentity: ReadIdentity | undefined;
     const onMetaVerified = overlap
-      ? (v: { readonly meta: DriveFileMeta; readonly identity: ReadIdentity }) => {
+      ? (v: {
+          readonly meta: DriveFileMeta;
+          readonly identity: ReadIdentity;
+          readonly fromCache: boolean;
+        }) => {
           earlyIdentity = v.identity;
           earlyMedia = provider.openContent({
             identity: v.identity,
             ref: { id: fileId },
             signal: earlyCtl.signal,
+            ...(v.fromCache ? { metaFromCache: true } : {}),
           });
           // Attach-only catch (L1): a rejection stays observable at the
           // `await earlyMedia` below without ever going unhandled.
@@ -291,6 +298,12 @@ async function handleContent(c: RouterContext, deps: ContentRouteDeps) {
           timing: timingFor(c.req.raw),
           shared: sharedVerdictStoreFor(c),
           identities: admitted.identities,
+          metaCache: metaCacheFor(c),
+          // HEAD never opens media, so nothing downstream re-proves the
+          // verdict: only rows carrying the SA's own metadata may hit
+          // (review M1). GET accepts oauth_list rows too.
+          ...(isHead ? { metaCacheSource: 'sa_meta' as const } : {}),
+          writeBehind: (work) => defer(c, work),
           ...(onMetaVerified === undefined ? {} : { onMetaVerified }),
         },
       );
@@ -415,6 +428,13 @@ async function handleContent(c: RouterContext, deps: ContentRouteDeps) {
         ...(upstreamRange === undefined ? {} : { range: upstreamRange }),
         ...(revisionId === undefined ? {} : { revisionId }),
         signal: controller.signal,
+        // Only the open that trusted the cached verdict is suppressed; the
+        // failover loop live-verifies other identities before opening, so
+        // their denials report normally (review M2).
+        ...(verified.fromCache === true &&
+        identity.serviceAccountId === verified.identity.serviceAccountId
+          ? { metaFromCache: true }
+          : {}),
       });
 
     // The early media open is reusable only when the verdict kept the same
@@ -428,18 +448,31 @@ async function handleContent(c: RouterContext, deps: ContentRouteDeps) {
       upstreamRange === undefined &&
       revisionId === undefined;
     let upstream: UpstreamContent;
-    if (earlyUsable) {
-      try {
-        upstream = await earlyMedia!;
-      } catch (err) {
-        // Same terminal taxonomy as openWithFailover: non-eligible reasons
-        // propagate, eligible ones fall through to the bounded retry path.
-        if (
-          !(err instanceof DriveError) ||
-          NON_FAILOVER_REASONS.has(err.reason)
-        ) {
-          throw err;
+    try {
+      if (earlyUsable) {
+        try {
+          upstream = await earlyMedia!;
+        } catch (err) {
+          // Same terminal taxonomy as openWithFailover: non-eligible
+          // reasons propagate, eligible ones fall through to the bounded
+          // retry path.
+          if (
+            !(err instanceof DriveError) ||
+            NON_FAILOVER_REASONS.has(err.reason)
+          ) {
+            throw err;
+          }
+          upstream = await openWithFailover(
+            provider,
+            admitted.mount,
+            fileId,
+            verified,
+            controller.signal,
+            open,
+          );
         }
+      } else {
+        dropEarly();
         upstream = await openWithFailover(
           provider,
           admitted.mount,
@@ -449,18 +482,19 @@ async function handleContent(c: RouterContext, deps: ContentRouteDeps) {
           open,
         );
       }
-    } else {
-      dropEarly();
-      upstream = await openWithFailover(
-        provider,
-        admitted.mount,
+    } catch (err) {
+      // The SA media call is the final authority (wave-10 §3): a denial
+      // class means the cached row — hit or not — is stale. Invalidate it
+      // off the critical path and, on a cache hit, re-run the live SA
+      // check so the response is exactly what the live path returns.
+      throw await mediaDenialError(c, deps, {
+        mount: admitted.mount,
         fileId,
         verified,
-        controller.signal,
-        open,
-      );
+        err,
+      });
     }
-    relayContentHeaders(headers, upstream, size);
+    relayContentHeaders(headers, upstream, size, verified.fromCache === true);
     // Disposition is computed against the DELIVERED type (reviewer F3): the
     // upstream can answer a different Content-Type than metadata promised —
     // e.g. an error page or an HTML/SVG variant — and the active-type
@@ -488,6 +522,7 @@ function relayContentHeaders(
   headers: Headers,
   upstream: UpstreamContent,
   size: bigint | undefined,
+  metaFromCache: boolean,
 ): void {
   if (upstream.contentType !== undefined) {
     headers.set('Content-Type', upstream.contentType);
@@ -496,8 +531,13 @@ function relayContentHeaders(
     headers.set('Content-Range', upstream.contentRange);
     headers.set('Accept-Ranges', 'bytes');
   }
+  // When upstream sends no Content-Length the metadata size stands in —
+  // but never a CACHED size (review L3): on a hit the response streams
+  // without Content-Length exactly like the live path would if upstream
+  // omitted it.
   const length =
-    upstream.contentLength ?? (upstream.status === 200 ? size : undefined);
+    upstream.contentLength ??
+    (upstream.status === 200 && !metaFromCache ? size : undefined);
   if (length !== undefined) {
     headers.set('Content-Length', length.toString(10));
   }

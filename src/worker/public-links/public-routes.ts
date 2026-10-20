@@ -424,6 +424,8 @@ export function createPublicLinkRouter(deps: PublicLinkRouterDeps = {}) {
         parentFolderId: folderId,
         ...(pageToken === undefined ? {} : { pageToken }),
       });
+      // No metadata-cache fill here (review M5): public opens never read
+      // the cache, so anonymous traffic must not cause D1 writes.
       return c.json(PublicChildrenPageSchema.parse({
         folderId: meta.id,
         folderName: meta.name,

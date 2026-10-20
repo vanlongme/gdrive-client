@@ -109,6 +109,7 @@ async function resetState() {
     'mount_grants',
     'mount_read_credentials',
     'containment_verdicts',
+    'file_metadata_cache', 'file_metadata_tombstones',
     'mounts',
     'audit_events',
     'oauth_transactions',

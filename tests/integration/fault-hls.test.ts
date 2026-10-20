@@ -67,6 +67,7 @@ async function resetState() {
     'mount_drive_permissions',
     'media_package_resources', 'media_packages', 'file_readiness',
     'mount_grants', 'mount_read_credentials', 'containment_verdicts',
+    'file_metadata_cache', 'file_metadata_tombstones',
     'mounts', 'google_connections',
     'oauth_transactions', 'google_oauth_clients', 'service_accounts', 'user', 'app_settings',
   ]) {

@@ -39,6 +39,7 @@ import {
   type MountRecord,
 } from '../drive/mounts';
 import { invalidateFolder } from '../drive/containment';
+import { createFileMetadataCache } from '../drive/metadata-cache';
 import { isDriveError } from '../drive/errors';
 import { isMaintenanceActive } from '../security/rotation';
 import {
@@ -64,6 +65,7 @@ import {
 } from './reconcile';
 import { checkReaderAccess, runVerify } from './verify';
 import { runTrash } from './cancel';
+import { defer } from '../timing';
 import {
   assertNodeAcceptsOperation,
   claimOperation,
@@ -249,6 +251,8 @@ export interface DriveCtx {
   body?: ReadableStream<Uint8Array> | null;
   declaredLength?: number;
   signal?: AbortSignal;
+  /** Off-critical-path work hook (route-level defer/waitUntil). */
+  runLater?: (work: Promise<unknown>) => void;
 }
 
 export function providerFor(ctx: DriveCtx): OAuthCatalogWriteProvider {
@@ -424,6 +428,7 @@ async function executeDirective(
       return runTrash({
         provider,
         directive: { ...directive, writer: writer.writer },
+        db: ctx.env.DB,
         ...(ctx.signal === undefined ? {} : { signal: ctx.signal }),
       });
     }
@@ -666,6 +671,20 @@ async function finalizeReaderAccess(
   mount: MountRecord | null,
 ): Promise<void> {
   const snap = ctx.snapshot;
+  if (snap.state === 'completed' && snap.generatedFileId !== undefined) {
+    // Wave-10 invalidation: the finalize created/replaced remote content,
+    // so any cached metadata row for the generated file id is stale. The
+    // delete is required but not latency-critical — waitUntil is enough
+    // (review M4); without a hook it still runs fire-and-forget.
+    const work = createFileMetadataCache(ctx.env.DB).invalidateFile(
+      snap.generatedFileId,
+    );
+    if (ctx.runLater === undefined) {
+      work.catch(() => undefined);
+    } else {
+      ctx.runLater(work);
+    }
+  }
   if (
     snap.state !== 'completed' ||
     snap.generatedFileId === undefined ||
@@ -964,6 +983,7 @@ export function createUploadRouter(deps: UploadRouterDeps = {}) {
       if (!res.ok) return doErrorResponse(c, res);
       const ctx = makeCtx(c.env, operation.id, res.snapshot, {
         signal: c.req.raw.signal,
+        runLater: (work) => defer(c, work),
       });
       await driveDirectives(ctx, res.directive);
       await finalizeReaderAccess(ctx, mount);
@@ -1067,6 +1087,7 @@ export function createUploadRouter(deps: UploadRouterDeps = {}) {
         body: c.req.raw.body,
         declaredLength,
         signal: c.req.raw.signal,
+        runLater: (work) => defer(c, work),
       });
       await driveDirectives(ctx, res.directive);
       await finalizeReaderAccess(ctx, mount);
@@ -1102,6 +1123,7 @@ export function createUploadRouter(deps: UploadRouterDeps = {}) {
         if (!res.ok) return doErrorResponse(c, res);
         const ctx = makeCtx(c.env, row.id, res.snapshot, {
           signal: c.req.raw.signal,
+          runLater: (work) => defer(c, work),
         });
         await driveDirectives(ctx, res.directive);
         await finalizeReaderAccess(ctx, mount);

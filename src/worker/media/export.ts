@@ -12,7 +12,7 @@
  */
 
 import { ApiRequestError } from '../drive/mounts';
-import type { ExportFormat } from '../drive/types';
+import type { ExportFormat, UpstreamContent } from '../drive/types';
 import { EXPORT_FORMATS } from '../drive/types';
 import {
   admitFileRead,
@@ -20,6 +20,7 @@ import {
   contentErrorResponse,
   downstreamAbortableBody,
   linkRequestSignal,
+  mediaDenialError,
   openWithFailover,
   providerFor,
   requireDriveId,
@@ -90,20 +91,35 @@ export async function handleExport(
     const fileId = requireDriveId(requireParam(c, 'fileId'), 'fileId');
     const controller = new AbortController();
     linkRequestSignal(c.req.raw, controller);
-    const upstream = await openWithFailover(
-      provider,
-      admitted.mount,
-      fileId,
-      admitted.verified,
-      controller.signal,
-      (identity, ref) =>
-        provider.exportDocument({
-          identity,
-          ref,
-          format,
-          signal: controller.signal,
-        }),
-    );
+    let upstream: UpstreamContent;
+    try {
+      upstream = await openWithFailover(
+        provider,
+        admitted.mount,
+        fileId,
+        admitted.verified,
+        controller.signal,
+        (identity, ref) =>
+          provider.exportDocument({
+            identity,
+            ref,
+            format,
+            signal: controller.signal,
+            ...(admitted.verified.fromCache === true &&
+            identity.serviceAccountId ===
+              admitted.verified.identity.serviceAccountId
+              ? { metaFromCache: true }
+              : {}),
+          }),
+      );
+    } catch (err) {
+      throw await mediaDenialError(c, deps, {
+        mount: admitted.mount,
+        fileId,
+        verified: admitted.verified,
+        err,
+      });
+    }
 
     const contentType = upstream.contentType ?? 'application/pdf';
     const headers = new Headers();

@@ -851,6 +851,85 @@ describe('GoogleOAuthProvider', () => {
     );
   });
 
+  it('parses downloadRestrictions strictly: both levels with booleans or no verdict (round-2 review)', async () => {
+    const restrictions = {
+      itemDownloadRestriction: {
+        restrictedForReaders: false,
+        restrictedForWriters: false,
+      },
+      effectiveDownloadRestrictionWithContext: {
+        restrictedForReaders: false,
+        restrictedForWriters: false,
+      },
+    };
+    const { fetchImpl } = stubFetch(() =>
+      jsonResponse({
+        files: [
+          fileJson({ id: 'full', downloadRestrictions: restrictions }),
+          fileJson({
+            id: 'missing-level',
+            downloadRestrictions: {
+              itemDownloadRestriction: restrictions.itemDownloadRestriction,
+            },
+          }),
+          fileJson({
+            id: 'empty-levels',
+            downloadRestrictions: {
+              itemDownloadRestriction: {},
+              effectiveDownloadRestrictionWithContext: {},
+            },
+          }),
+          fileJson({
+            id: 'non-boolean',
+            downloadRestrictions: {
+              itemDownloadRestriction: { restrictedForReaders: 'yes' },
+              effectiveDownloadRestrictionWithContext:
+                restrictions.effectiveDownloadRestrictionWithContext,
+            },
+          }),
+          fileJson({
+            id: 'restricted',
+            downloadRestrictions: {
+              itemDownloadRestriction: {
+                restrictedForReaders: false,
+                restrictedForWriters: false,
+              },
+              effectiveDownloadRestrictionWithContext: {
+                restrictedForReaders: true,
+                restrictedForWriters: true,
+              },
+            },
+          }),
+        ],
+      }),
+    );
+    const provider = createGoogleOAuthProvider({
+      tokenSource: new FakeTokenSource(),
+      transport: createDriveTransport('google_oauth', { fetchImpl }),
+    });
+    const page = await provider.listChildren({
+      writer: WRITER,
+      scope: SHARED_SCOPE,
+      parentFolderId: 'root',
+    });
+    const byId = new Map(page.entries.map((e) => [e.id, e]));
+    expect(byId.get('full')?.downloadRestrictions).toEqual({
+      restrictedForReaders: false,
+      restrictedForWriters: false,
+    });
+    // A missing level — or keys that carry no booleans — is an unverifiable
+    // verdict: the entry must surface NO downloadRestrictions so the cache
+    // verdict stays reader_can_download = 0 (round-2 review).
+    expect(byId.get('missing-level')?.downloadRestrictions).toBeUndefined();
+    expect(byId.get('empty-levels')?.downloadRestrictions).toBeUndefined();
+    expect(byId.get('non-boolean')?.downloadRestrictions).toBeUndefined();
+    // The union of both levels: any restriction either level reports counts.
+    expect(byId.get('restricted')?.downloadRestrictions).toEqual({
+      restrictedForReaders: true,
+      restrictedForWriters: true,
+    });
+  });
+
   it('lists a My Drive folder with corpora=user and no Shared Drive parameters', async () => {
     const { fetchImpl, requests } = stubFetch(() =>
       jsonResponse({ files: [fileJson({ id: 'f1' })] }),
@@ -1417,8 +1496,14 @@ describe('ServiceAccountReadProvider', () => {
     const { fetchImpl, requests } = stubFetch((req) => {
       if (req.url.hostname === 'www.googleapis.com') {
         expect(req.url.pathname).toBe('/drive/v3/files/t-1');
+        // The legacy metadata read also proves the download verdict the
+        // route's admission check would have (wave-10 review M3).
+        expect(req.url.searchParams.get('fields')).toBe(
+          'thumbnailLink,capabilities(canDownload)',
+        );
         return jsonResponse({
           thumbnailLink: 'https://lh3.googleusercontent.com/thumb-abc',
+          capabilities: { canDownload: true },
         });
       }
       if (req.url.hostname === 'lh3.googleusercontent.com') {
@@ -1442,11 +1527,81 @@ describe('ServiceAccountReadProvider', () => {
     expect(requests).toHaveLength(2);
   });
 
+  it('denies the thumbnail when the legacy metadata read reports canDownload=false', async () => {
+    const { fetchImpl, requests } = stubFetch(() =>
+      jsonResponse({
+        thumbnailLink: 'https://lh3.googleusercontent.com/thumb-x',
+        capabilities: { canDownload: false },
+      }),
+    );
+    const { provider } = saProvider(fetchImpl);
+    // Same verdict the live path's checkFileMeta gives: download-restricted
+    // maps to FILE_NOT_READABLE_BY_POOL and never rotates identities.
+    await expect(
+      provider.openThumbnail({ identity: READER, ref: { id: 't-9' } }),
+    ).rejects.toMatchObject({ reason: 'download-restricted' });
+    expect(requests).toHaveLength(1);
+  });
+
+  it('treats a missing canDownload on the legacy read as inconclusive', async () => {
+    const { fetchImpl } = stubFetch(() =>
+      jsonResponse({ thumbnailLink: 'https://lh3.googleusercontent.com/t' }),
+    );
+    const { provider } = saProvider(fetchImpl);
+    // Same as checkFileMeta's missing-capability arm: failover-eligible.
+    await expect(
+      provider.openThumbnail({ identity: READER, ref: { id: 't-10' } }),
+    ).rejects.toMatchObject({ reason: 'upstream-unavailable' });
+  });
+
+  it('suppresses the file_limited report for a cache-metadata open (wave-10 review M2)', async () => {
+    const { fetchImpl, requests } = queueFetch([
+      googleErrorResponse(403, ['cannotDownloadFile']),
+    ]);
+    const { source, provider } = saProvider(fetchImpl);
+    await expect(
+      provider.openContent({
+        identity: READER,
+        ref: { id: 'locked' },
+        metaFromCache: true,
+      }),
+    ).rejects.toMatchObject({ reason: 'download-restricted' });
+    expect(source.failures).toEqual([]);
+    expect(requests).toHaveLength(1);
+  });
+
+  it('a cache-metadata open still reports real per-file caps (round-2 review)', async () => {
+    // downloadQuotaExceeded is a real file cap, not a cached-verdict
+    // mismatch: only cannotDownloadFile may be suppressed.
+    for (const reason of ['downloadQuotaExceeded', 'fileDownloadLimitExceeded']) {
+      const { fetchImpl, requests } = queueFetch([
+        googleErrorResponse(403, [reason]),
+      ]);
+      const { source, provider } = saProvider(fetchImpl);
+      await expect(
+        provider.openContent({
+          identity: READER,
+          ref: { id: 'capped' },
+          metaFromCache: true,
+        }),
+      ).rejects.toMatchObject({ reason: 'download-restricted' });
+      expect(source.failures).toEqual([
+        {
+          identity: source.calls[0]?.identity,
+          kind: 'file_limited',
+          fileId: 'capped',
+        },
+      ]);
+      expect(requests).toHaveLength(1);
+    }
+  });
+
   it('refuses a thumbnail URL outside the allowlist before fetching it', async () => {
     const { fetchImpl, requests } = stubFetch((req) => {
       if (req.url.hostname === 'www.googleapis.com') {
         return jsonResponse({
           thumbnailLink: 'https://evil.example.com/steal',
+          capabilities: { canDownload: true },
         });
       }
       throw new Error(`unexpected host ${req.url.hostname}`);

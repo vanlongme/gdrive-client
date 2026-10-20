@@ -30,6 +30,14 @@ import {
 } from '../drive/containment';
 import { DriveError, type DriveFailureReason } from '../drive/errors';
 import {
+  cachedMetaToDriveFileMeta,
+  createFileMetadataCache,
+  isMediaAuthorityFailure,
+  rowFromDriveMeta,
+  type FileMetaCacheSource,
+  type FileMetadataCacheStore,
+} from '../drive/metadata-cache';
+import {
   ApiRequestError,
   failureFromError,
   getMount,
@@ -68,6 +76,7 @@ import {
   type TicketPrincipal,
 } from '../security/tickets';
 import {
+  defer,
   requestTokenMemo,
   timedParentLookup,
   timedSaProvider,
@@ -120,6 +129,11 @@ export type RouterContext = Context<{
  */
 export function sharedVerdictStoreFor(c: RouterContext): SharedVerdictStore {
   return createD1VerdictStore(c.env.DB);
+}
+
+/** The wave-10 file metadata cache for this request's D1 (migration 0010). */
+export function metaCacheFor(c: RouterContext): FileMetadataCacheStore {
+  return createFileMetadataCache(c.env.DB);
 }
 
 export function providerFor(
@@ -571,6 +585,12 @@ export interface VerifiedFileRead {
   readonly identity: ReadIdentity;
   /** All enabled pool candidates in selection order (for open failover). */
   readonly identities: readonly ReadIdentity[];
+  /**
+   * True when `meta` came from the wave-10 metadata cache instead of a
+   * live SA files.get. Fields the cache deliberately does not store
+   * (thumbnailLink) must not be treated as "known absent".
+   */
+  readonly fromCache?: boolean;
 }
 
 const OUTSIDE_MOUNT_MESSAGE = 'The file is trashed or outside the mount drive.';
@@ -712,14 +732,31 @@ export interface VerifiedFileReadOpts {
   /** Pre-resolved read pool (skips a duplicate listReadIdentities read). */
   readonly identities?: readonly ReadIdentity[];
   /**
+   * Wave-10 metadata cache (migration 0010): a fresh, reader-eligible row
+   * substitutes for the SA metadata read; anything else takes the live
+   * path and refills the cache off the critical path via writeBehind.
+   */
+  readonly metaCache?: FileMetadataCacheStore;
+  /**
+   * Restrict cache hits to rows written by this source (review M1): HEAD
+   * never opens media, so only a row carrying the SA's own verdict
+   * ('sa_meta') may answer — an OAuth-inferred verdict has no SA proof.
+   */
+  readonly metaCacheSource?: FileMetaCacheSource;
+  /** Off-critical-path write hook (route-level defer/waitUntil). */
+  readonly writeBehind?: (work: Promise<unknown>) => void;
+  /**
    * Fired exactly once after the winning SA metadata read passes
    * checkFileMeta, BEFORE the My Drive containment walk — the caller may
    * overlap a media open with the walk while no byte is served yet
    * (coordinator M4 ruling: media opens only after metadata checks pass).
+   * `fromCache` reports whether the verified meta was synthesized from a
+   * cache row, so the overlapped open can mark itself accordingly.
    */
   readonly onMetaVerified?: (verified: {
     readonly meta: DriveFileMeta;
     readonly identity: ReadIdentity;
+    readonly fromCache: boolean;
   }) => void;
 }
 
@@ -747,25 +784,69 @@ export async function verifiedFileForRead(
       'content: the mount read pool has no enabled service account',
     );
   }
-  const { meta, identity } = await withReadIdentity(
-    identities,
-    async (identity) => {
-      const meta = await provider.getReadMetadata({
-        identity,
-        ref: { id: fileId },
-        ...(signal === undefined ? {} : { signal }),
-      });
-      // Scope checks inside the failover loop: an identity that answers
-      // for the wrong object or cannot affirm the capability fails over;
-      // objective scope verdicts (outside drive, trashed, shortcut,
-      // canDownload=false) are ApiRequestError and never rotate.
-      checkFileMeta(meta, mount, fileId);
-      return { identity, meta };
-    },
-  );
+  // Wave-10: a fresh, reader-eligible cache row substitutes for the SA
+  // metadata call. get() already filtered expired and
+  // reader_can_download = 0 rows and swallowed D1 errors; a miss or any
+  // lookup failure falls through to the identical live path.
+  const cached =
+    opts.metaCache === undefined
+      ? undefined
+      : await opts.metaCache.get(mount, fileId, opts.metaCacheSource);
+  // Only a configured cache earns a mark — the media-denial live re-check
+  // passes no metaCache and must not append a second, misleading 'miss'
+  // after the first call's 'hit' (review round-2).
+  if (opts.metaCache !== undefined) {
+    opts.timing?.mark('meta-cache', cached === undefined ? 'miss' : 'hit');
+  }
+  let meta: DriveFileMeta;
+  let identity: ReadIdentity;
+  let fromCache = false;
+  if (cached !== undefined) {
+    meta = cachedMetaToDriveFileMeta(fileId, cached);
+    // The same verdicts run on cached facts exactly as on a live read:
+    // id match, trashed, outside-drive and shortcut all still deny. The
+    // canDownload arm cannot fire — eligibility already required the
+    // stored reader verdict, and the media call stays the final authority.
+    checkFileMeta(meta, mount, fileId);
+    identity = identities[0]!;
+    fromCache = true;
+  } else {
+    const resolved = await withReadIdentity(
+      identities,
+      async (identity) => {
+        // fetchedAt must predate the upstream call (review round-2): the
+        // tombstone guard compares against the fetch START, so a read that
+        // raced an invalidation can never resurrect the stale row.
+        const fetchStartedAt = Date.now();
+        const meta = await provider.getReadMetadata({
+          identity,
+          ref: { id: fileId },
+          ...(signal === undefined ? {} : { signal }),
+        });
+        // Fill source 'sa_meta' off the critical path — even when the
+        // verdict denies: a trashed/outside-drive row caches the denial
+        // and a restricted row lands with reader_can_download = 0 so it
+        // can never hit. Only exact-id, keyless, non-shortcut,
+        // non-folder metas produce a row.
+        const row = rowFromDriveMeta(mount.id, meta, Date.now(), fetchStartedAt);
+        if (opts.metaCache !== undefined && row !== undefined) {
+          const work = opts.metaCache.put([row]);
+          opts.writeBehind?.(work);
+        }
+        // Scope checks inside the failover loop: an identity that answers
+        // for the wrong object or cannot affirm the capability fails over;
+        // objective scope verdicts (outside drive, trashed, shortcut,
+        // canDownload=false) are ApiRequestError and never rotate.
+        checkFileMeta(meta, mount, fileId);
+        return { identity, meta };
+      },
+    );
+    meta = resolved.meta;
+    identity = resolved.identity;
+  }
   // checkFileMeta has passed for this exact identity: the earliest point a
   // media open may start (coordinator M4). Runs before the containment walk.
-  opts.onMetaVerified?.({ meta, identity });
+  opts.onMetaVerified?.({ meta, identity, fromCache });
   // Proven once per admission, outside the SA failover loop: containment is a
   // property of the file id, not of which pool identity happened to read it.
   if (mount.driveId === null) {
@@ -789,6 +870,7 @@ export async function verifiedFileForRead(
     },
     identity,
     identities,
+    fromCache,
   };
 }
 
@@ -936,6 +1018,50 @@ export async function admitFileRequest(
   return { mount, principal: admission.principal, identities };
 }
 
+/**
+ * Media-authority failure handling shared by the content, thumbnail and
+ * export routes (wave-10 §3, review M2/L4/M4). A denial-class media failure
+ * means any cached row is stale: the row is invalidated off the critical
+ * path (waitUntil) — and when the read was served FROM the cache, the live
+ * SA metadata check runs again so the caller surfaces exactly the error
+ * the live path returns (e.g. checkFileMeta's FILE_NOT_READABLE_BY_POOL).
+ * The recheck deliberately passes no metaCache: the deferred delete may not
+ * have landed yet, and a row filled right after a media denial would keep
+ * a genuinely-limited file from ever reporting its cooldown.
+ * Returns the error to surface; the recheck's own denial wins when thrown.
+ */
+export async function mediaDenialError(
+  c: RouterContext,
+  deps: ContentRouteDeps,
+  input: {
+    readonly mount: MountRecord;
+    readonly fileId: string;
+    readonly verified: VerifiedFileRead;
+    readonly err: unknown;
+  },
+): Promise<unknown> {
+  if (!isMediaAuthorityFailure(input.err)) return input.err;
+  defer(c, metaCacheFor(c).invalidateFile(input.fileId));
+  if (input.verified.fromCache !== true) return input.err;
+  // Throws the live path's denial on stale verdicts; on a pass the
+  // original error stands (it maps to the same response either way).
+  await verifiedFileForRead(
+    providerFor(c, deps),
+    c.env,
+    input.mount,
+    input.fileId,
+    c.req.raw.signal,
+    deps.oauthProvider,
+    {
+      tokenSource: tokenSourceFor(c, c.env),
+      timing: timingFor(c.req.raw),
+      shared: sharedVerdictStoreFor(c),
+      identities: input.verified.identities,
+    },
+  );
+  return input.err;
+}
+
 export async function admitFileRead(
   c: RouterContext,
   deps: ContentRouteDeps,
@@ -955,6 +1081,8 @@ export async function admitFileRead(
       timing: timingFor(c.req.raw),
       shared: sharedVerdictStoreFor(c),
       identities: admitted.identities,
+      metaCache: metaCacheFor(c),
+      writeBehind: (work) => defer(c, work),
     },
   );
   return { mount: admitted.mount, verified, principal: admitted.principal };

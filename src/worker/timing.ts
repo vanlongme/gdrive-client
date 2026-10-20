@@ -55,13 +55,25 @@ export class RequestTiming {
     this.buckets.set(bucket, entry);
   }
 
-  /** `d1;dur=12.4;cnt=9, admit;dur=0.1;cnt=0` — never ids or secrets. */
+  private readonly marks = new Map<string, Set<string>>();
+
+  /** A label without duration (e.g. meta-cache hit/miss), values unioned. */
+  mark(bucket: string, desc: string): void {
+    const set = this.marks.get(bucket) ?? new Set<string>();
+    set.add(desc);
+    this.marks.set(bucket, set);
+  }
+
+  /** `d1;dur=12.4;cnt=9, meta-cache;desc="hit"` — never ids or secrets. */
   render(): string {
     const parts: string[] = [];
     for (const [name, entry] of this.buckets) {
       parts.push(
         `${name};dur=${entry.ms.toFixed(1)};cnt=${String(entry.count)}`,
       );
+    }
+    for (const [name, descs] of this.marks) {
+      parts.push(`${name};desc="${[...descs].join(',')}"`);
     }
     return parts.join(', ');
   }

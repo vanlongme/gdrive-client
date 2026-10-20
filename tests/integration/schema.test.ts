@@ -127,6 +127,7 @@ describe('migration authority', () => {
       'google_connections',
       'oauth_transactions',
       'containment_verdicts',
+    'file_metadata_cache', 'file_metadata_tombstones',
     'mounts',
       'mount_read_credentials',
       'mount_grants',

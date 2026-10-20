@@ -743,6 +743,60 @@ export const containmentVerdicts = sqliteTable(
   ],
 );
 
+// ---------------------------------------------------------------------------
+// Wave 10 (migration 0010): file metadata cache. A fresh row
+// (expires_at > now) may substitute for the SA files.get on content opens;
+// only rows with reader_can_download = 1 are ever eligible. Rows carry the
+// facts checkFileMeta / range planning / containment need — never resource
+// keys, thumbnail links or credentials. App-made mutations delete by
+// file_id or by (mount_id, parent_id); fills prune expired rows.
+// ---------------------------------------------------------------------------
+export const FILE_METADATA_CACHE_SOURCES = ['oauth_list', 'sa_meta'] as const;
+export type FileMetadataCacheSource =
+  (typeof FILE_METADATA_CACHE_SOURCES)[number];
+
+export const fileMetadataCache = sqliteTable(
+  'file_metadata_cache',
+  {
+    mountId: text('mount_id').notNull(),
+    fileId: text('file_id').notNull(),
+    name: text('name').notNull(),
+    mimeType: text('mime_type').notNull(),
+    size: text('size'),
+    md5: text('md5'),
+    modifiedTime: text('modified_time'),
+    trashed: integer('trashed', { mode: 'boolean' }).notNull().default(false),
+    driveId: text('drive_id'),
+    parentId: text('parent_id'),
+    readerCanDownload: integer('reader_can_download', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    headRevisionId: text('head_revision_id'),
+    source: text('source', { enum: FILE_METADATA_CACHE_SOURCES }).notNull(),
+    cachedAt: integer('cached_at', { mode: 'timestamp_ms' }).notNull(),
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.mountId, t.fileId] }),
+    index('idx_file_metadata_cache_expires').on(t.expiresAt),
+    index('idx_file_metadata_cache_file').on(t.fileId),
+  ],
+);
+
+// Per-file invalidation tombstones (review L2): a fill whose upstream fetch
+// predates the latest invalidation is skipped instead of resurrecting a
+// stale row. Same 60 s bound as the cache rows.
+export const fileMetadataTombstones = sqliteTable(
+  'file_metadata_tombstones',
+  {
+    fileId: text('file_id').primaryKey(),
+    invalidatedAt: integer('invalidated_at', { mode: 'timestamp_ms' })
+      .notNull(),
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => [index('idx_file_metadata_tombstones_expires').on(t.expiresAt)],
+);
+
 // One-use owner recovery tokens; only the SHA-256 hash is stored.
 export const adminRecoveryTokens = sqliteTable(
   'admin_recovery_tokens',

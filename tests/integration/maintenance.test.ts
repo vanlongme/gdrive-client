@@ -123,6 +123,7 @@ async function resetState() {
     'upload_batch_nodes', 'upload_operations', 'upload_batches',
     'audit_events', 'share_links',
     'media_package_resources', 'media_packages', 'containment_verdicts',
+    'file_metadata_cache', 'file_metadata_tombstones',
     'mounts',
     'oauth_transactions', 'google_connections', 'google_oauth_clients',
     'service_accounts', 'admin_recovery_tokens', 'maintenance_state',

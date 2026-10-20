@@ -14,6 +14,7 @@
 import { isDriveError } from '../drive/errors';
 import type { DriveFileMeta, OAuthCatalogWriteProvider } from '../drive/types';
 import { invalidateFolder, isInMount, oauthParentLookup } from '../drive/containment';
+import { createFileMetadataCache } from '../drive/metadata-cache';
 import { driveMatchesScope } from './upload-internal';
 import type { UploadDirective, UploadSessionEvent } from './upload-internal';
 
@@ -23,7 +24,7 @@ export type CheckWriterDirective = Extract<
   { kind: 'check-writer' }
 >;
 
-const DONE: UploadSessionEvent = { type: 'trash-result', outcome: 'done' };
+const DONE_EVENT: UploadSessionEvent = { type: 'trash-result', outcome: 'done' };
 
 function failed(reason: string): UploadSessionEvent {
   return { type: 'trash-result', outcome: 'failed', reason };
@@ -86,6 +87,8 @@ function provesTrashed(
 export async function runTrash(args: {
   provider: OAuthCatalogWriteProvider;
   directive: TrashDirective;
+  /** D1 handle for the wave-10 metadata-cache invalidation (optional). */
+  db?: D1Database;
   signal?: AbortSignal;
 }): Promise<UploadSessionEvent> {
   const { directive } = args;
@@ -93,6 +96,13 @@ export async function runTrash(args: {
   if (fileId === '' || directive.mountScope.rootFolderId === '') {
     return failed('unpinned-file');
   }
+  // The file is known-trashed: drop its metadata-cache rows (wave 10).
+  const done = async (): Promise<UploadSessionEvent> => {
+    if (args.db !== undefined) {
+      await createFileMetadataCache(args.db).invalidateFile(fileId);
+    }
+    return DONE_EVENT;
+  };
 
   const current = await readCurrentMeta(args, fileId);
   if (!current.ok) {
@@ -109,7 +119,7 @@ export async function runTrash(args: {
   }
   if (meta.trashed === true) {
     // Fresh evidence proves the pinned file is already trashed.
-    return DONE;
+    return done();
   }
   if (directive.mountScope.driveId === null) {
     // My Drive has no drive id to compare: the pinned file must still sit
@@ -150,7 +160,7 @@ export async function runTrash(args: {
     });
     // A trashed folder must not keep a cached in-mount verdict.
     invalidateFolder(directive.mountScope, fileId);
-    return DONE;
+    return done();
   } catch (err) {
     if (!isDriveError(err)) {
       return failed('transport-error');
@@ -160,7 +170,7 @@ export async function runTrash(args: {
       // Only a fresh affirmative trashed read satisfies the intent.
       const confirm = await readCurrentMeta(args, fileId);
       if (confirm.ok && provesTrashed(confirm.meta, directive)) {
-        return DONE;
+        return done();
       }
       return failed(`trash-ambiguous:${err.reason}`);
     }

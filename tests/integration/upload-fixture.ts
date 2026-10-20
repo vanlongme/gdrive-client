@@ -313,6 +313,7 @@ export async function resetState() {
     'mount_read_credentials',
     'mount_grants',
     'containment_verdicts',
+    'file_metadata_cache', 'file_metadata_tombstones',
     'mounts',
     'google_connections',
     'oauth_transactions',

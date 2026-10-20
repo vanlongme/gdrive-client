@@ -17,12 +17,14 @@ import {
   contentErrorResponse,
   downstreamAbortableBody,
   linkRequestSignal,
+  mediaDenialError,
   openWithFailover,
   providerFor,
   requireParam,
   type ContentRouteDeps,
   type RouterContext,
 } from '../transfers/content-access';
+import type { UpstreamContent } from '../drive/types';
 import {
   buildContentDisposition,
   resolveDisposition,
@@ -42,20 +44,40 @@ export async function handleThumbnail(
 
     const controller = new AbortController();
     linkRequestSignal(c.req.raw, controller);
-    const upstream = await openWithFailover(
-      provider,
-      admitted.mount,
-      fileId,
-      admitted.verified,
-      controller.signal,
-      (identity, ref) =>
-        provider.openThumbnail({
-          identity,
-          ref,
-          thumbnailLink: admitted.verified.meta.thumbnailLink ?? null,
-          signal: controller.signal,
-        }),
-    );
+    let upstream: UpstreamContent;
+    try {
+      upstream = await openWithFailover(
+        provider,
+        admitted.mount,
+        fileId,
+        admitted.verified,
+        controller.signal,
+        (identity, ref) =>
+          provider.openThumbnail({
+            identity,
+            ref,
+            // A metadata-cache hit carries no thumbnailLink — that is not
+            // "known absent": fall back to the provider's legacy files.get
+            // (which also re-proves capabilities.canDownload; review M3).
+            thumbnailLink:
+              admitted.verified.meta.thumbnailLink ??
+              (admitted.verified.fromCache === true ? undefined : null),
+            ...(admitted.verified.fromCache === true &&
+            identity.serviceAccountId ===
+              admitted.verified.identity.serviceAccountId
+              ? { metaFromCache: true }
+              : {}),
+            signal: controller.signal,
+          }),
+      );
+    } catch (err) {
+      throw await mediaDenialError(c, deps, {
+        mount: admitted.mount,
+        fileId,
+        verified: admitted.verified,
+        err,
+      });
+    }
 
     const headers = new Headers();
     // Disposition is computed against the DELIVERED type (reviewer F3) — an
