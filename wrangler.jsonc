@@ -5,6 +5,10 @@
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  // Run the Worker next to D1, the Durable Objects and Google in Hong Kong
+  // instead of whichever colo the visitor hits (SIN/HKG split doubled D1 and
+  // DO latency). Static assets are still served from the nearest colo.
+  "placement": { "region": "gcp:asia-east2" },
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
